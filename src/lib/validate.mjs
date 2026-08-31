@@ -23,6 +23,15 @@ export function validateInput(input) {
     return { valid: false, reason: 'input not object' };
   }
 
+  // 总字节数限制（sec/perf Medium：MAX_INPUT_BYTES 生效，防超大 stdin 拖垮运行时）
+  try {
+    if (Buffer.byteLength(JSON.stringify(input)) > MAX_INPUT_BYTES) {
+      return { valid: false, reason: 'input exceeds max bytes' };
+    }
+  } catch {
+    return { valid: false, reason: 'input not serializable' };
+  }
+
   // sessionId 类型校验
   if (input.sessionId !== undefined && input.sessionId !== null && typeof input.sessionId !== 'string') {
     return { valid: false, reason: 'sessionId not string' };
@@ -41,12 +50,17 @@ export function validateInput(input) {
   return { valid: true };
 }
 
-/** 路径防护：拒绝路径遍历（..）与危险字符 */
+/**
+ * 路径防护：拒绝路径遍历（.. 段）与危险字符。
+ * 精确按段判断（sec Low 修复）：`a..b` 合法，`..` / `a/../b` 拒绝。
+ */
 export function isSafePath(p) {
   if (typeof p !== 'string' || p.length === 0) return false;
   const normalized = p.replace(/\\/g, '/');
-  if (normalized.includes('..')) return false; // 路径穿越
   if (normalized.includes('\0')) return false; // NUL 字节
+  // 按 / 拆分，逐段判断，仅拒绝恰好为 ".." 的段
+  const segments = normalized.split('/');
+  if (segments.includes('..')) return false; // 路径穿越
   return true;
 }
 

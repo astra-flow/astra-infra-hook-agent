@@ -20,21 +20,40 @@ export default async function decisionLog(input, meta, { debug = false } = {}) {
   const prompt = input.prompt || '';
   if (!prompt) return buildAllow('decision-log: no prompt');
 
-  // 决策分类
+  // 决策分类（正则预编译缓存，perf Low 修复）
   const classification = classifyDecision(prompt, meta);
   if (!classification) return buildAllow('decision-log: no decision keyword');
 
-  // 提取 Issue 编号：优先 prompt #N，其次 "issue N"，再次分支名
-  const issueNum = extractIssueNumber(prompt);
-  if (!issueNum) return buildAllow('decision-log: no issue number');
+  // 提取 Issue 编号：仅同步做纯字符串正则；git 分支名兜底移入后台（perf Medium 修复）
+  let issueNum = extractIssueNumberSync(prompt);
+  if (!issueNum) {
+    // 无编号 → 后台尝试分支名兜底；主流程先返回（避免同步 git 阻塞）
+    setImmediate(() => {
+      const branchNum = extractFromBranch();
+      if (branchNum) postComment(branchNum, classification, prompt, meta, { debug });
+    });
+    return buildAllow('decision-log: scheduled branch-resolve');
+  }
 
-  // async 后台评论（CP-03），不 await 阻塞——但保证失败静默
-  // 用 setImmediate 让调用方先返回决策
+  // async 后台评论（CP-03）：setImmediate 让调用方先返回决策；
+  // bin 入口用 process.exitCode=0（非 exit()），事件循环会等回调执行完（async 失效修复）
   setImmediate(() => {
     postComment(issueNum, classification, prompt, meta, { debug });
   });
 
   return buildAllow('decision-log: scheduled comment');
+}
+
+/** 正则缓存（perf Low：避免每次调用 new RegExp） */
+const patternCache = new Map();
+
+function compilePattern(p) {
+  let re = patternCache.get(p);
+  if (!re) {
+    re = new RegExp(p);
+    patternCache.set(p, re);
+  }
+  return re;
 }
 
 /** 决策分类：命中返回 {type,label}，未命中返回 null */
@@ -43,10 +62,10 @@ function classifyDecision(prompt, meta) {
   const neg = meta.negativePatterns || [];
 
   for (const p of pos) {
-    if (new RegExp(p).test(prompt)) return { type: '正向决策', label: describePositive(p) };
+    if (compilePattern(p).test(prompt)) return { type: '正向决策', label: describePositive(p) };
   }
   for (const p of neg) {
-    if (new RegExp(p).test(prompt)) return { type: '反向决策', label: describeNegative(p) };
+    if (compilePattern(p).test(prompt)) return { type: '反向决策', label: describeNegative(p) };
   }
   return null;
 }
@@ -65,43 +84,55 @@ function describeNegative(p) {
   return '需要修改';
 }
 
-/** 提取 Issue 编号 */
-function extractIssueNumber(prompt) {
+/** 提取 Issue 编号：仅纯字符串正则（同步，无 git） */
+function extractIssueNumberSync(prompt) {
   const m1 = prompt.match(/#(\d+)/);
   if (m1) return m1[1];
   const m2 = prompt.match(/issue\s*(\d+)/i);
   if (m2) return m2[1];
-  // 分支名兜底
-  try {
-    const branch = execFileSyncSafe('git', ['branch', '--show-current']);
-    const m3 = (branch || '').match(/(\d+)$/);
-    if (m3) return m3[1];
-  } catch { /* noop */ }
   return null;
 }
 
-/** 评论到 Issue（gh CLI，失败静默） */
-function postComment(issueNum, classification, prompt, meta, { debug = false }) {
-  const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
-  const branch = execFileSyncSafe('git', ['branch', '--show-current']) || '未知';
-  const sessionId = 'session'; // 运行时注入的 session 经 input 传入更佳
-
-  const body =
-    `**用户${classification.type}：${classification.label}**（${timestamp}）\n\n` +
-    `> ${prompt.trim()}\n\n---\n` +
-    `- 分支：\`${branch}\`\n` +
-    `- 来源：UserPromptSubmit hook 自动记录（astra-hook decision-log）`;
-
-  execFile('gh', ['issue', 'comment', issueNum, '--body', body], (err) => {
-    if (debug && err) console.error(`[decision-log] gh comment failed: ${err.message}`);
-  });
-}
-
-/** 安全执行命令并返回 stdout（失败返回 null） */
-function execFileSyncSafe(cmd, args) {
+/** 从分支名解析 Issue 编号（后台调用，带 timeout） */
+function extractFromBranch() {
   try {
-    return execFileSync(cmd, args, { encoding: 'utf8' }).trim();
+    const branch = execFileSync('git', ['branch', '--show-current'], { encoding: 'utf8', timeout: 3000 }).trim();
+    const m = (branch || '').match(/(\d+)$/);
+    return m ? m[1] : null;
   } catch {
     return null;
   }
+}
+
+/** prompt 脱敏（sec Medium）：截断 + 去链接/@ + 敏感键值隐藏，防 Markdown 注入 */
+function sanitizePrompt(prompt) {
+  let s = String(prompt || '').trim();
+  if (s.length > 500) s = `${s.slice(0, 500)}…(截断)`;
+  // 去 @ 提人（防社交工程）
+  s = s.replace(/@[\w.-]+/g, '@***');
+  // 去 URL（防外链注入）
+  s = s.replace(/https?:\/\/[^\s]+/g, '[link]');
+  // 隐藏常见敏感模式（key/token 等）
+  s = s.replace(/(key|token|password|secret|api[_-]?key)\s*[:=]\s*\S+/gi, '$1=***');
+  // 控制字符清理
+  s = s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+  return s;
+}
+
+/** 评论到 Issue（gh CLI，失败静默；execFile 带 timeout） */
+function postComment(issueNum, classification, prompt, meta, { debug = false }) {
+  const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const branch = extractFromBranch() || '未知';
+
+  const body =
+    `**用户${classification.type}：${classification.label}**（${timestamp}）\n\n` +
+    `> ${sanitizePrompt(prompt)}\n\n---\n` +
+    `- 分支：\`${branch}\`\n` +
+    `- 来源：UserPromptSubmit hook 自动记录（astra-hook decision-log）`;
+
+  const child = execFile('gh', ['issue', 'comment', issueNum, '--body', body], { timeout: 10000 }, (err) => {
+    if (debug && err) console.error(`[decision-log] gh comment failed: ${err.message}`);
+  });
+  // 避免超时后子进程残留
+  if (child) child.on('error', () => { /* fail-open */ });
 }

@@ -27,26 +27,36 @@ function sanitizeId(id) {
   return String(id).replace(/[^a-zA-Z0-9._-]/g, '_');
 }
 
-/** 轻量文件锁：基于 mkdir atomicity + retry */
-async function withLock(lockDir, fn, { timeoutMs = 1000, retryIntervalMs = 10 } = {}) {
+/**
+ * 轻量文件锁：基于 openSync('wx') 原子创建 + retry（perf Medium #3 修复）。
+ * - 'wx' 原子性：已存在则抛 EEXIST，避免 mkdir recursive 的 stat 遍历。
+ * - 超时分支只 fail-open 直接执行，**绝不删除他人持有的锁**（避免破坏临界区）。
+ * - 默认超时降至 300ms（PreToolUse 决策时延预算有限）。
+ */
+async function withLock(lockPath, fn, { timeoutMs = 300, retryIntervalMs = 10 } = {}) {
   const start = Date.now();
+  let fd = null;
   for (;;) {
     try {
-      fs.mkdirSync(lockDir, { recursive: false });
+      fd = fs.openSync(lockPath, 'wx');
       break;
-    } catch {
+    } catch (err) {
+      if (err.code !== 'EEXIST') {
+        // 非 EEXIST（如 EACCES/ENOENT）：不阻塞，fail-open 直接执行
+        return fn();
+      }
       if (Date.now() - start > timeoutMs) {
-        // 锁超时：不阻塞主流程（fail-open），直接执行（接受极小概率竞态）
-        try { fs.rmdirSync(lockDir, { recursive: true }); } catch { /* noop */ }
+        // 锁超时：不删他人锁，直接执行（接受极小概率竞态，保持 fail-open）
         return fn();
       }
       await new Promise((r) => setTimeout(r, retryIntervalMs));
     }
   }
   try {
+    if (fd !== null) fs.closeSync(fd);
     return await fn();
   } finally {
-    try { fs.rmdirSync(lockDir, { recursive: true }); } catch { /* noop */ }
+    try { fs.rmSync(lockPath, { force: true }); } catch { /* noop */ }
   }
 }
 
@@ -74,10 +84,10 @@ export async function readState(name, sessionId) {
  */
 export async function updateState(name, sessionId, mutate) {
   const file = stateFilePath(name, sessionId);
-  const lockDir = `${file}.lock`;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const lockPath = `${file}.lock`;
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
 
-  return withLock(lockDir, async () => {
+  return withLock(lockPath, async () => {
     const prev = await readState(name, sessionId);
     const next = mutate(prev);
     if (next === null) return prev;

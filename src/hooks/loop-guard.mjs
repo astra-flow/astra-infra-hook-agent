@@ -29,10 +29,12 @@ export default async function loopGuard(input, meta, { debug = false } = {}) {
 
   if (!sessionId) return buildAllow('loop-guard: no session');
 
-  // 指纹：工具名 + 参数（稳定序列化）
+  // 指纹：工具名 + 参数。性能优化（perf High #2）：
+  // 不做全量深拷贝+键排序，仅对 JSON 字符串化结果截断（FINGERPRINT_MAX）再 hash。
+  // 截断保留参数前缀足以区分不同调用；超大输入（create_file/read_file）不再 O(n) 深拷贝。
   const fingerprint = crypto
     .createHash('sha256')
-    .update(toolName + JSON.stringify(stableSerialize(toolInput || {})))
+    .update(toolName + stableFingerprint(toolInput))
     .digest('hex');
 
   const threshold = meta.threshold || 3;
@@ -64,22 +66,49 @@ export default async function loopGuard(input, meta, { debug = false } = {}) {
   return buildAllow(`loop-guard: streak=${streak}/${threshold}`, hookEventName || 'PreToolUse');
 }
 
-/** 稳定序列化（键排序，避免 key 顺序导致指纹漂移） */
-function stableSerialize(obj) {
-  if (obj === null || typeof obj !== 'object') return obj;
-  if (Array.isArray(obj)) return obj.map(stableSerialize);
-  return Object.keys(obj).sort().reduce((acc, k) => {
-    acc[k] = stableSerialize(obj[k]);
-    return acc;
-  }, {});
+/** 指纹输入截断上限（防超大 toolInput 全量 hash） */
+const FINGERPRINT_MAX = 2048;
+
+/**
+ * 稳定指纹源：JSON 字符串化 + 截断。
+ * - 不做键排序/深拷贝（性能）：参数对象键序通常稳定（同一工具同一调用方），
+ *   即便键序漂移导致指纹不同，最坏结果是少拦截一次重复，可接受（fail-open 语义）。
+ * - 截断保留前缀，足以区分不同参数内容。
+ */
+function stableFingerprint(obj) {
+  let s;
+  try {
+    s = JSON.stringify(obj || {});
+  } catch {
+    s = String(obj);
+  }
+  return s.length > FINGERPRINT_MAX ? s.slice(0, FINGERPRINT_MAX) : s;
 }
 
-/** 工具参数摘要（截断 200 字符） */
+/** 敏感键匹配（隐藏 content/command/apiKey 等） */
+const SENSITIVE_KEY_RE = /(content|command|body|api[_-]?key|token|password|secret|code)/i;
+
+/**
+ * 工具参数摘要（deny 理由用）：键名化 + 脱敏，避免回显敏感参数（sec Medium）。
+ * 输出形如：`{ filePath: "/tmp/x", content: [REDACTED] }`
+ */
 function summarizeToolInput(toolInput) {
   try {
-    const s = JSON.stringify(toolInput);
-    return s.length > 200 ? `${s.slice(0, 200)}...` : s;
+    if (toolInput === null || typeof toolInput !== 'object') return String(toolInput);
+    const parts = [];
+    for (const [k, v] of Object.entries(toolInput)) {
+      if (SENSITIVE_KEY_RE.test(k)) {
+        parts.push(`${k}: [REDACTED]`);
+      } else if (typeof v === 'string') {
+        parts.push(`${k}: ${v.length > 80 ? `${v.slice(0, 80)}...` : v}`);
+      } else if (typeof v === 'object') {
+        parts.push(`${k}: ${JSON.stringify(v).length > 80 ? '{...}' : JSON.stringify(v)}`);
+      } else {
+        parts.push(`${k}: ${String(v)}`);
+      }
+    }
+    return `{ ${parts.join(', ')} }`;
   } catch {
-    return String(toolInput);
+    return '[unserializable]';
   }
 }

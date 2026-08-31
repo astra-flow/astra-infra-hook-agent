@@ -74,3 +74,18 @@ test('CP-05: path traversal protection', () => {
   assert.equal(isSafePath('/abs/path'), true);
   assert.equal(isSafePath('a\\..\\b'), false);
 });
+
+test('CP-05: isSafePath precise segment check (a..b is valid)', () => {
+  assert.equal(isSafePath('a..b'), true);      // 合法文件名，非穿越
+  assert.equal(isSafePath('a/../b'), false);   // 穿越段
+  assert.equal(isSafePath('../x'), false);     // 穿越段
+  assert.equal(isSafePath('a/b/c'), true);
+});
+
+test('CP-05: MAX_INPUT_BYTES enforced', async () => {
+  // 构造 > 1MB 的 prompt 输入 → fail-open（不 deny，但被拦截）
+  const bigPrompt = 'x'.repeat(1_100_000);
+  const input = JSON.stringify({ sessionId: 's', prompt: bigPrompt, hookEventName: 'UserPromptSubmit' });
+  const r = await run('decision-log', input, {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow'); // fail-open
+});

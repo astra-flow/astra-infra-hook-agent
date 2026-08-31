@@ -62,10 +62,10 @@ export default async function sessionIssueLink(input, meta, { debug = false } = 
   return buildAllow('session-issue-link: recorded');
 }
 
-/** 从分支名解析 Issue 编号 */
+/** 从分支名解析 Issue 编号（带 timeout，sec Low 修复） */
 function extractFromBranch() {
   try {
-    const branch = execFileSync('git', ['branch', '--show-current'], { encoding: 'utf8' }).trim();
+    const branch = execFileSync('git', ['branch', '--show-current'], { encoding: 'utf8', timeout: 3000 }).trim();
     const m = branch.match(/(\d+)$/);
     return m ? m[1] : '';
   } catch {

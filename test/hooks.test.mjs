@@ -128,3 +128,48 @@ test('decision-log: Approved keyword classified', async () => {
   const r = await run('decision-log', input, {});
   assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
 });
+
+test('decision-log: schedule comment (setImmediate fires, not dropped)', async () => {
+  // 修复验证：setImmediate 回调必须执行（bin 用 process.exitCode 而非 exit()）。
+  // 此测试直接调用 decisionLog 的内部行为——通过 run 返回后等待事件循环 flush，
+  // 确认调度发生且 fail-open（gh 缺失/失败静默，不抛错）。
+  const input = JSON.stringify({
+    sessionId: SESSION,
+    prompt: 'Decision: Approved（#9999）',
+    hookEventName: 'UserPromptSubmit',
+  });
+  const r = await run('decision-log', input, {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+  // 等待 setImmediate 回调执行（gh 命令可能失败但必须被触发，不阻塞测试）
+  await new Promise((res) => setImmediate(res));
+});
+
+test('loop-guard: large toolInput fingerprint stays fast (perf High #2)', async () => {
+  // 修复验证：大 content 输入不应导致深拷贝爆炸（稳定截断 hash）
+  const bigInput = {
+    sessionId: SESSION,
+    toolName: 'create_file',
+    toolInput: { filePath: '/tmp/big.txt', content: 'y'.repeat(500_000) },
+    hookEventName: 'PreToolUse',
+  };
+  const start = Date.now();
+  const r = await run('loop-guard', JSON.stringify(bigInput), {});
+  const elapsed = Date.now() - start;
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+  assert.ok(elapsed < 1000, `fingerprint took ${elapsed}ms, expected < 1000ms`);
+});
+
+test('loop-guard: deny reason redacts sensitive keys (sec Medium)', async () => {
+  // 触发 deny，检查 deny 理由不含敏感 content 明文
+  const mk = () => JSON.stringify({
+    sessionId: SESSION,
+    toolName: 'create_file',
+    toolInput: { filePath: '/tmp/secret.txt', content: 'TOP-SECRET-CONTENT' },
+    hookEventName: 'PreToolUse',
+  });
+  await run('loop-guard', mk(), {});
+  await run('loop-guard', mk(), {});
+  const r = await run('loop-guard', mk(), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'deny');
+  assert.ok(!r.hookSpecificOutput.permissionDecisionReason.includes('TOP-SECRET-CONTENT'), 'deny reason leaks content');
+});

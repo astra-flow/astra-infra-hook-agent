@@ -11,9 +11,37 @@
  * 决策，绝不阻塞正常工具调用。
  */
 import { normalizeInput } from './lib/normalize.mjs';
-import { validateInput } from './lib/validate.mjs';
+import { validateInput, isHotTool } from './lib/validate.mjs';
 import { buildDecision, FAIL_OPEN_DECISION } from './lib/decision.mjs';
 import { loadHookMetadata } from './lib/config.mjs';
+
+/** 脱敏：隐藏敏感键的值（key/token/password/secret/apiKey/content/command 等） */
+const SENSITIVE_KEY_RE = /(key|token|password|secret|credential|api[_-]?key|authorization)/i;
+const SENSITIVE_CONTENT_RE = /(key|token|password|secret|api[_-]?key|authorization)/i;
+
+function redactValue(key, value) {
+  if (typeof value === 'string' && SENSITIVE_KEY_RE.test(key)) return '[REDACTED]';
+  return value;
+}
+
+/** debug 日志脱敏：只打印字段名 + 脱敏后的值/类型 */
+function summarizeInput(input) {
+  const out = {};
+  for (const [k, v] of Object.entries(input)) {
+    if (v === null || v === undefined) { out[k] = v; continue; }
+    if (typeof v === 'object') {
+      // 对象：打印键名 + 脱敏标记
+      out[k] = { keys: Object.keys(v), length: JSON.stringify(v).length };
+    } else if (SENSITIVE_CONTENT_RE.test(k)) {
+      out[k] = '[REDACTED]';
+    } else if (typeof v === 'string' && v.length > 200) {
+      out[k] = `${v.slice(0, 200)}...(${v.length})`;
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
 
 /**
  * 执行指定 hook。
@@ -38,7 +66,7 @@ export async function run(hookName, stdin, opts = {}) {
 
     // 2. 平台字段归一化（snake_case → camelCase）
     const input = normalizeInput(rawInput);
-    if (debug) console.error('[astra-hook] normalized input:', JSON.stringify(input));
+    if (debug) console.error('[astra-hook] input:', JSON.stringify(summarizeInput(input)));
 
     // 3. 输入白名单校验（无效输入 fail-open，不阻塞）
     const validation = validateInput(input);
@@ -59,6 +87,15 @@ export async function run(hookName, stdin, opts = {}) {
     if (meta.events && meta.events.length > 0 && !meta.events.includes(eventName)) {
       if (debug) console.error(`[astra-hook] event "${eventName}" not in ${meta.events.join(',')}, skip`);
       return buildDecision('allow', `${hookName}: event not applicable`);
+    }
+
+    // 5b. 工具预过滤（CP-03 增强）：hook 声明 hotTools 且当前工具不在白名单 → 跳过，
+    //     连动态 import / hook 模块解析都省去（进一步降低高频事件开销）
+    if (meta.hotTools && Array.isArray(meta.hotTools) && meta.hotTools.length > 0 && input.toolName) {
+      if (!isHotTool(input.toolName, meta.hotTools)) {
+        if (debug) console.error(`[astra-hook] tool "${input.toolName}" not hot for ${hookName}, skip`);
+        return buildDecision('allow', `${hookName}: tool not monitored`);
+      }
     }
 
     // 6. 动态加载 hook 模块并执行

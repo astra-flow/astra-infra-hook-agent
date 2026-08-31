@@ -42,7 +42,12 @@ async function main() {
 
   // result 已保证是合法决策 JSON（fail-open 兜底），原样输出
   process.stdout.write(JSON.stringify(result));
-  process.exit(0);
+
+  // 关键：使用 process.exitCode = 0 而非 process.exit(0)。
+  // process.exit() 会强制终止事件循环，导致 decision-log 的 setImmediate 后台
+  // 副作用（gh 评论）被丢弃，async 设计失效。exitCode 方式让事件循环自然退出，
+  // execFile 回调（默认持有事件循环引用）能执行完。
+  process.exitCode = 0;
 }
 
 main().catch(() => {
