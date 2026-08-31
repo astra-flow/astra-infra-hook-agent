@@ -15,14 +15,8 @@ import { validateInput, isHotTool } from './lib/validate.mjs';
 import { buildDecision, FAIL_OPEN_DECISION } from './lib/decision.mjs';
 import { loadHookMetadata } from './lib/config.mjs';
 
-/** 脱敏：隐藏敏感键的值（key/token/password/secret/apiKey/content/command 等） */
+/** 敏感键匹配（debug 日志脱敏用） */
 const SENSITIVE_KEY_RE = /(key|token|password|secret|credential|api[_-]?key|authorization)/i;
-const SENSITIVE_CONTENT_RE = /(key|token|password|secret|api[_-]?key|authorization)/i;
-
-function redactValue(key, value) {
-  if (typeof value === 'string' && SENSITIVE_KEY_RE.test(key)) return '[REDACTED]';
-  return value;
-}
 
 /** debug 日志脱敏：只打印字段名 + 脱敏后的值/类型 */
 function summarizeInput(input) {
@@ -30,9 +24,9 @@ function summarizeInput(input) {
   for (const [k, v] of Object.entries(input)) {
     if (v === null || v === undefined) { out[k] = v; continue; }
     if (typeof v === 'object') {
-      // 对象：打印键名 + 脱敏标记
+      // 对象：打印键名 + 长度
       out[k] = { keys: Object.keys(v), length: JSON.stringify(v).length };
-    } else if (SENSITIVE_CONTENT_RE.test(k)) {
+    } else if (SENSITIVE_KEY_RE.test(k)) {
       out[k] = '[REDACTED]';
     } else if (typeof v === 'string' && v.length > 200) {
       out[k] = `${v.slice(0, 200)}...(${v.length})`;

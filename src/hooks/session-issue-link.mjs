@@ -48,7 +48,9 @@ export default async function sessionIssueLink(input, meta, { debug = false } = 
   if (!linkFile || !isSafePath(linkFile)) return buildAllow('session-issue-link: unsafe link path');
 
   const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
-  const line = `- ${timestamp} | ${eventType} | session=${sessionId || 'unknown'} | issue=#${issueNum}\n`;
+  // sessionId 行注入防护（sec 复审 Low）：替换换行/控制字符，避免污染审计文件
+  const safeSession = String(sessionId || 'unknown').replace(/[\r\n\u0000-\u001F]/g, '_');
+  const line = `- ${timestamp} | ${eventType} | session=${safeSession} | issue=#${issueNum}\n`;
 
   try {
     const absPath = resolveLinkFile(linkFile);

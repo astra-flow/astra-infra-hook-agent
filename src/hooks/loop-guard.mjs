@@ -94,7 +94,7 @@ const SENSITIVE_KEY_RE = /(content|command|body|api[_-]?key|token|password|secre
  */
 function summarizeToolInput(toolInput) {
   try {
-    if (toolInput === null || typeof toolInput !== 'object') return String(toolInput);
+    if (toolInput === null || typeof toolInput !== 'object') return '[unserializable]';
     const parts = [];
     for (const [k, v] of Object.entries(toolInput)) {
       if (SENSITIVE_KEY_RE.test(k)) {
@@ -102,7 +102,9 @@ function summarizeToolInput(toolInput) {
       } else if (typeof v === 'string') {
         parts.push(`${k}: ${v.length > 80 ? `${v.slice(0, 80)}...` : v}`);
       } else if (typeof v === 'object') {
-        parts.push(`${k}: ${JSON.stringify(v).length > 80 ? '{...}' : JSON.stringify(v)}`);
+        // 嵌套对象统一输出键名+长度（sec 复审 Medium 修复）：
+        // 避免 ≤80 字符时完整打印嵌套对象的敏感键值（如 {config:{apiKey:"sk-..."}}）
+        parts.push(`${k}: {keys: ${Object.keys(v).join(',') || '(empty)'}}`);
       } else {
         parts.push(`${k}: ${String(v)}`);
       }
