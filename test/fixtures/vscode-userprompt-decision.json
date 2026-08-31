@@ -1,0 +1,5 @@
+{
+  "sessionId": "test-session-003",
+  "prompt": "Decision: Approved，可以开始了（issue #900）",
+  "hookEventName": "UserPromptSubmit"
+}

@@ -1,0 +1,6 @@
+{
+  "sessionId": "test-session-001",
+  "toolName": "create_file",
+  "toolInput": { "filePath": "/tmp/foo.txt", "content": "hello" },
+  "hookEventName": "PreToolUse"
+}

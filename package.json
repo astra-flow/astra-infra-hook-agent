@@ -1,0 +1,22 @@
+{
+  "name": "@astra/hook-agent",
+  "version": "0.1.0",
+  "description": "Astra Flow Hook 工具运行时（平台能力层）—— 跨平台 Agent Hook 统一执行器",
+  "type": "module",
+  "bin": {
+    "astra-hook": "./bin/astra-hook.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/",
+    "test:watch": "node --test --watch test/"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "dependencies": {},
+  "files": [
+    "bin/",
+    "src/"
+  ]
+}

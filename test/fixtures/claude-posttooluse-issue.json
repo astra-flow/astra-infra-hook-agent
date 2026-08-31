@@ -1,0 +1,6 @@
+{
+  "session_id": "test-session-004",
+  "tool_name": "issue_write",
+  "tool_response": "{\"id\":\"900\",\"url\":\"https://github.com/astra-flow/astra/issues/900\"}",
+  "hook_event_name": "PostToolUse"
+}

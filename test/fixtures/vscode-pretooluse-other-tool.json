@@ -1,0 +1,6 @@
+{
+  "sessionId": "test-session-005",
+  "toolName": "fetch_webpage",
+  "toolInput": { "urls": ["https://example.com"] },
+  "hookEventName": "PreToolUse"
+}

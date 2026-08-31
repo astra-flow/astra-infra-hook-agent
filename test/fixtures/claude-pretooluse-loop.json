@@ -1,0 +1,6 @@
+{
+  "session_id": "test-session-002",
+  "tool_name": "Write",
+  "tool_input": { "file_path": "/tmp/bar.md", "content": "world" },
+  "hook_event_name": "PreToolUse"
+}
