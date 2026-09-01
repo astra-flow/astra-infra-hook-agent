@@ -64,8 +64,8 @@ export function isSafePath(p) {
   return true;
 }
 
-/** 工具名白名单检查（用于 loop-guard 预过滤，不在白名单则跳过检测） */
-export function isHotTool(toolName, hotTools) {
-  if (!toolName || !Array.isArray(hotTools)) return false;
-  return hotTools.includes(toolName);
+/** 豁免名单检查（2026-09-01 语义反转）：只读工具豁免，其余全部监控（含 MCP 工具） */
+export function isExemptTool(toolName, exemptTools) {
+  if (!toolName || !Array.isArray(exemptTools)) return false;
+  return exemptTools.includes(toolName);
 }

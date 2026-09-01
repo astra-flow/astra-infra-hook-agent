@@ -14,11 +14,15 @@ export const HOOK_METADATA = {
     events: ['PreToolUse'],
     timeoutMs: 5000,
     platforms: ['vscode', 'claude-code'],
-    // 高频易重复的工具白名单：仅对这些工具做指纹检测，降低无关调用开销
-    hotTools: [
-      'create_file', 'replace_string_in_file', 'multi_replace_string_in_file',
-      'read_file', 'run_in_terminal', 'run_task',
-      'Write', 'Edit', 'Read', 'Bash', 'NotebookEdit',
+    // 豁免名单（exempt，2026-09-01 语义反转）：只读无害工具跳过指纹检测。
+    // 旧 hotTools 白名单模式 = 默认放行未知工具，导致 MCP 工具（如
+    // add_issue_comment）重复调用 60+ 次未被拦截（#899 占位评论事故）。
+    // 新语义：默认监控所有工具（含 MCP），仅豁免明确只读的工具。
+    exemptTools: [
+      'read_file', 'Read', 'fetch_webpage', 'grep_search', 'list_dir',
+      'file_search', 'view_image', 'copilot_getNotebookSummary',
+      'read_notebook_cell_output', 'terminal_last_command', 'terminal_selection',
+      'get_task_output', 'get_errors', 'read_page',
     ],
     threshold: 3, // 连续 N 次相同指纹触发拦截
     maxHistory: 50,

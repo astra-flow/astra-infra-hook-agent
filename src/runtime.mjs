@@ -11,7 +11,7 @@
  * 决策，绝不阻塞正常工具调用。
  */
 import { normalizeInput } from './lib/normalize.mjs';
-import { validateInput, isHotTool } from './lib/validate.mjs';
+import { validateInput, isExemptTool } from './lib/validate.mjs';
 import { buildDecision, FAIL_OPEN_DECISION } from './lib/decision.mjs';
 import { loadHookMetadata } from './lib/config.mjs';
 
@@ -83,12 +83,12 @@ export async function run(hookName, stdin, opts = {}) {
       return buildDecision('allow', `${hookName}: event not applicable`);
     }
 
-    // 5b. 工具预过滤（CP-03 增强）：hook 声明 hotTools 且当前工具不在白名单 → 跳过，
-    //     连动态 import / hook 模块解析都省去（进一步降低高频事件开销）
-    if (meta.hotTools && Array.isArray(meta.hotTools) && meta.hotTools.length > 0 && input.toolName) {
-      if (!isHotTool(input.toolName, meta.hotTools)) {
-        if (debug) console.error(`[astra-hook] tool "${input.toolName}" not hot for ${hookName}, skip`);
-        return buildDecision('allow', `${hookName}: tool not monitored`);
+    // 5b. 工具预过滤（2026-09-01 语义反转）：豁免名单模式——默认监控所有工具
+    //     （含 MCP），仅豁免只读工具。旧白名单模式导致 MCP 工具重复调用未被拦截。
+    if (meta.exemptTools && Array.isArray(meta.exemptTools) && input.toolName) {
+      if (isExemptTool(input.toolName, meta.exemptTools)) {
+        if (debug) console.error(`[astra-hook] tool "${input.toolName}" exempt (read-only), skip`);
+        return buildDecision('allow', `${hookName}: tool exempt`);
       }
     }
 

@@ -12,7 +12,7 @@
 import crypto from 'node:crypto';
 import { buildDeny, buildAllow } from '../lib/decision.mjs';
 import { updateState } from '../lib/state.mjs';
-import { isHotTool } from '../lib/validate.mjs';
+import { isExemptTool } from '../lib/validate.mjs';
 
 /**
  * @param {object} input - 归一化输入（camelCase）
@@ -21,10 +21,10 @@ import { isHotTool } from '../lib/validate.mjs';
 export default async function loopGuard(input, meta, { debug = false } = {}) {
   const { toolName, toolInput, sessionId, hookEventName } = input;
 
-  // 预过滤：仅对高频易重复工具做检测（CP-03，避免每次 spawn 都做状态 IO）
-  if (!isHotTool(toolName, meta.hotTools)) {
-    if (debug) console.error(`[loop-guard] tool "${toolName}" not hot, skip`);
-    return buildAllow('loop-guard: tool not monitored');
+  // 预过滤（2026-09-01 语义反转）：豁免名单模式——只读工具跳过，其余全部监控
+  if (isExemptTool(toolName, meta.exemptTools)) {
+    if (debug) console.error(`[loop-guard] tool "${toolName}" exempt, skip`);
+    return buildAllow('loop-guard: tool exempt');
   }
 
   if (!sessionId) return buildAllow('loop-guard: no session');

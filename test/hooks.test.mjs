@@ -26,15 +26,33 @@ test.beforeEach(() => {
   clearState('loop-guard', SESSION);
 });
 
-test('CP-03: loop-guard skips non-hot tool (prefilter)', async () => {
+test('loop-guard: exempt read-only tool skipped (prefilter)', async () => {
   const input = JSON.stringify({
     sessionId: SESSION,
-    toolName: 'fetch_webpage',
-    toolInput: { urls: ['https://example.com'] },
+    toolName: 'read_file',
+    toolInput: { filePath: '/tmp/a.txt' },
     hookEventName: 'PreToolUse',
   });
   const r = await run('loop-guard', input, {});
   assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+  assert.match(r.hookSpecificOutput.permissionDecisionReason, /exempt/);
+});
+
+test('loop-guard: MCP tool IS monitored (2026-09-01 incident regression)', async () => {
+  // 事故回归：add_issue_comment 曾因不在白名单被跳过，60+ 次重复评论未拦截。
+  // 语义反转后 MCP 工具必须被监控：3 次相同调用 → deny。
+  const mk = () => JSON.stringify({
+    sessionId: SESSION,
+    toolName: 'mcp_github_mcp_se_add_issue_comment',
+    toolInput: { body: '（占位）', issue_number: 899, owner: 'astra-flow', repo: 'astra' },
+    hookEventName: 'PreToolUse',
+  });
+  const r1 = await run('loop-guard', mk(), {});
+  const r2 = await run('loop-guard', mk(), {});
+  const r3 = await run('loop-guard', mk(), {});
+  assert.equal(r1.hookSpecificOutput.permissionDecision, 'allow');
+  assert.equal(r2.hookSpecificOutput.permissionDecision, 'allow');
+  assert.equal(r3.hookSpecificOutput.permissionDecision, 'deny', 'MCP tool repeat must be denied');
 });
 
 test('loop-guard: single call allowed (streak 1)', async () => {
