@@ -39,9 +39,9 @@ echo '{"sessionId":"smoke","toolName":"create_file","toolInput":{"filePath":"/tm
 ### 排障
 
 | 现象 | 原因 | 处理 |
-|------|------|------|
-| 工具调用被莫名 deny | submodule 未初始化，command 指向空目录（fail-closed）| 执行步骤 1 |
-| hook 无任何反应 | `.github/hooks/*.json` 未被 VS Code 加载（hooks 为 Preview 功能）| 检查 VS Code 版本与 hooks 开关 |
+| ------ | ------ | ------ |
+| 工具调用被莫名 deny | submodule 未初始化，command 指向空目录（fail-closed） | 执行步骤 1 |
+| hook 无任何反应 | `.github/hooks/*.json` 未被 VS Code 加载（hooks 为 Preview 功能） | 检查 VS Code 版本与 hooks 开关 |
 | decision-log 不评论 | gh 未登录或 prompt 无决策关键词 | `gh auth status` 检查；确认 prompt 含 `Approved`/`驳回` 等关键词 + `#Issue号` |
 
 ## 使用前提

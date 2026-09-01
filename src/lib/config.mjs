@@ -23,6 +23,8 @@ export const HOOK_METADATA = {
       'file_search', 'view_image', 'copilot_getNotebookSummary',
       'read_notebook_cell_output', 'terminal_last_command', 'terminal_selection',
       'get_task_output', 'get_errors', 'read_page',
+      // 轮询/预览类（2026-09-01 误判修复）：连续同参调用是合法等待模式
+      'get_terminal_output', 'screenshot_page',
     ],
     threshold: 3, // 连续 N 次相同指纹触发拦截
     maxHistory: 50,

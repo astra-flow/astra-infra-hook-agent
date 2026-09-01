@@ -51,15 +51,28 @@ export default async function loopGuard(input, meta, { debug = false } = {}) {
 
   const streak = state?.streak || 1;
 
-  // 连续达到阈值 → deny
+  // 连续达到阈值 → deny（含 Agent 纠偏指引，确保 Agent 能采取行动而非盲目重试）
   if (streak >= threshold) {
     const summary = summarizeToolInput(toolInput);
+    // 连续拦截升级：streak 超过阈值 2 次以上，说明 Agent 未响应纠偏指引，升级警告
+    const escalation =
+      streak >= threshold + 2
+        ? `\n- ⚠️ 升级警告：本工具已被连续拦截 ${streak - threshold + 1} 次，你仍未改变行为。请立即停止该工具调用，直接向用户文字报告阻塞状态。`
+        : '';
     return buildDeny(
       `[防循环拦截] 检测到重复执行：工具 \`${toolName}\` 已连续调用 ${streak} 次且无进展。\n\n` +
       `- 最近一次参数：\`${summary}\`\n` +
       `- 原因：相同工具 + 相同参数重复执行，疑似陷入死循环\n` +
-      `- 要求：立即停止重复，改用其他方案；若确实无法推进，请向用户报告当前阻塞状态并等待指示，不要继续尝试变体。`,
-      hookEventName || 'PreToolUse'
+      `- 纠偏选项（任选其一）：\n` +
+      `  1. 改用其他工具或方案完成同一目标\n` +
+      `  2. 若参数确需变化，修改参数后重试（参数变化会重置计数）\n` +
+      `  3. 若确实无法推进，停止调用，向用户文字报告阻塞状态并等待指示\n` +
+      `- 禁止：原样重试（会再次被拦截）或仅微调措辞后重试同一操作` +
+      escalation,
+      hookEventName || 'PreToolUse',
+      // systemMessage：注入模型上下文，确保 Agent 拿到纠偏信息（而非只看到"被拒绝"）
+      `[astra-hook loop-guard] 工具 ${toolName} 已连续 ${streak} 次以相同参数调用，本次调用已被阻止。` +
+      `这不是瞬时故障，不会因重试而恢复。请立即改变行为：换方案 / 修改参数 / 或向用户报告阻塞。`
     );
   }
 
