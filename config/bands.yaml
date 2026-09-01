@@ -1,0 +1,27 @@
+# bands.yaml — Maintain σ 分级边界可调配置（#916）
+#
+# 用途：将 AFE σ 分级（1σ 记录 / 2σ 只读诊断 / 3σ 允许行动）与 hook 阈值
+#       从代码硬编码抽取为版本化配置，运行时经 lib/config.mjs loadBands() 读取。
+#
+# 加载规则：
+#   - 位置：hook-agent/config/bands.yaml（默认）；env ASTRA_BANDS_FILE 可覆盖
+#   - 文件缺失/解析失败 → 内置默认值兜底（fail-open，与 hook 整体语义一致）
+#   - 结构限制：两层嵌套 key: value（手工解析器，保持 D1 零第三方依赖）
+#
+# 修改本文件后无需重启（spawn-per-call 模型，每次调用重新加载）。
+
+sigma:
+  "1":
+    action: log
+    description: 仅记录（指标轻微漂移，写入日志，不行动）
+  "2":
+    action: diagnose
+    description: 只读诊断（调用只读分析，不产生变更）
+  "3":
+    action: act
+    description: 允许行动（可开 PR 进评审门禁，或触发预批准 runbook）
+
+loop-guard:
+  threshold: 3
+  breakerLimit: 8
+  maxHistory: 50

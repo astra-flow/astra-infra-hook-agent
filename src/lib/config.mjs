@@ -4,7 +4,12 @@
  * 元数据单一来源：本文件内 HOOK_METADATA 表（hook 名 → 事件/超时/平台/依赖）。
  * 运行时通过 lib/config.mjs 读取；`.github/hooks/*.json` 仅存 VS Code 执行配置
  * （command 指向 bin/astra-hook.mjs <hook>），两者职责分离。
+ *
+ * bands.yaml（#916）：σ 分级边界 + hook 阈值可调配置，loadBands() 加载。
  */
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /** hook 元数据 schema（平台能力层内部契约） */
 export const HOOK_METADATA = {
@@ -92,4 +97,98 @@ export function validateMetadataSchema() {
     }
   }
   return { valid: errors.length === 0, errors };
+}
+
+/**
+ * bands.yaml 加载（#916：σ 分级边界可调配置）。
+ *
+ * 设计要点：
+ *   - 零依赖：node 无内置 YAML 解析，bands.yaml 结构受限（两层嵌套 key: value），
+ *     手工解析器 ~30 行，避免引入 js-yaml（保持 D1 零第三方依赖决策）
+ *   - 兜底：文件缺失/解析失败 → 内置默认值（fail-open，与 hook 整体语义一致）
+ *   - 可覆盖：env ASTRA_BANDS_FILE 注入自定义路径（测试/多环境）
+ */
+
+/** 内置默认值（bands.yaml 缺失/解析失败时兜底） */
+export const BANDS_DEFAULTS = {
+  sigma: {
+    '1': { action: 'log', description: '仅记录' },
+    '2': { action: 'diagnose', description: '只读诊断' },
+    '3': { action: 'act', description: '允许行动' },
+  },
+  'loop-guard': { threshold: 3, breakerLimit: 8, maxHistory: 50 },
+};
+
+/** 解析单行 YAML 值（字符串去引号后仍尝试数字/布尔转换） */
+function parseYamlValue(raw) {
+  let v = raw.trim();
+  if (v === '' || v === 'null') return null;
+  if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+    v = v.slice(1, -1);
+  }
+  if (v === 'true') return true;
+  if (v === 'false') return false;
+  if (/^-?\d+$/.test(v)) return parseInt(v, 10);
+  if (/^-?\d+\.\d+$/.test(v)) return parseFloat(v);
+  return v;
+}
+
+/**
+ * 极简 YAML 解析（仅支持两层嵌套 mapping + 标量值，不支持列表/多行/锚点）。
+ * @param {string} text
+ * @returns {object|null} 解析失败返回 null（调用方兜底）
+ */
+export function parseSimpleYaml(text) {
+  try {
+    const root = {};
+    let section = null;
+    let subsection = null;
+    for (const line of text.split('\n')) {
+      const noComment = line.split('#')[0].rstrip?.() ?? line.split('#')[0].replace(/\s+$/, '');
+      if (!noComment.trim()) continue;
+      const indent = noComment.length - noComment.trimStart().length;
+      const content = noComment.trim();
+      const kv = content.match(/^([^:]+):\s*(.*)$/);
+      if (!kv) continue;
+      const key = kv[1].trim().replace(/^["']|["']$/g, '');
+      const value = kv[2];
+      if (indent === 0) {
+        if (value === '') { section = key; subsection = null; root[key] = root[key] ?? {}; }
+        else { root[key] = parseYamlValue(value); section = null; subsection = null; }
+      } else if (indent === 2 && section) {
+        if (value === '') { subsection = key; root[section][key] = root[section][key] ?? {}; }
+        else { root[section][key] = parseYamlValue(value); subsection = null; }
+      } else if (indent >= 4 && section && subsection) {
+        root[section][subsection][key] = parseYamlValue(value);
+      } else if (indent >= 4 && section) {
+        root[section][key] = parseYamlValue(value);
+      }
+    }
+    return root;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 加载 bands 配置（σ 分级边界 + hook 阈值）。
+ * @returns {object} bands（永远返回可用配置：文件优先，默认值兜底）
+ */
+export function loadBands() {
+  const bandsPath = process.env.ASTRA_BANDS_FILE
+    || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'config', 'bands.yaml');
+  try {
+    const parsed = parseSimpleYaml(fs.readFileSync(bandsPath, 'utf8'));
+    if (!parsed) return BANDS_DEFAULTS;
+    // 深度合并：文件值覆盖默认值，缺失字段用默认值补齐
+    const merged = JSON.parse(JSON.stringify(BANDS_DEFAULTS));
+    for (const section of Object.keys(merged)) {
+      if (parsed[section] && typeof parsed[section] === 'object') {
+        Object.assign(merged[section], parsed[section]);
+      }
+    }
+    return merged;
+  } catch {
+    return BANDS_DEFAULTS;
+  }
 }

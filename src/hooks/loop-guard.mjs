@@ -13,6 +13,7 @@ import crypto from 'node:crypto';
 import { buildDeny, buildAllow, buildCircuitBreaker } from '../lib/decision.mjs';
 import { updateState } from '../lib/state.mjs';
 import { isExemptTool } from '../lib/validate.mjs';
+import { loadBands } from '../lib/config.mjs';
 
 /**
  * @param {object} input - 归一化输入（camelCase）
@@ -37,7 +38,8 @@ export default async function loopGuard(input, meta, { debug = false } = {}) {
     .update(toolName + stableFingerprint(toolInput))
     .digest('hex');
 
-  const threshold = meta.threshold || 3;
+  // 阈值优先级（#916）：bands.yaml（可调配置）> meta（HOOK_METADATA 内置）> 硬编码兜底
+  const threshold = loadBands()['loop-guard']?.threshold || meta.threshold || 3;
 
   // 原子读-改-写：维护该 session 的连续指纹历史
   const state = await updateState('loop-guard', sessionId, (prev) => {
@@ -54,7 +56,7 @@ export default async function loopGuard(input, meta, { debug = false } = {}) {
   // 连续达到阈值 → deny（含 Agent 纠偏指引，确保 Agent 能采取行动而非盲目重试）
   if (streak >= threshold) {
     const summary = summarizeToolInput(toolInput);
-    const breakerLimit = meta.breakerLimit || 8;
+    const breakerLimit = loadBands()['loop-guard']?.breakerLimit || meta.breakerLimit || 8;
 
     // 熔断器（2026-09-01）：连续拦截达 breakerLimit → 终止整个 Agent 回合。
     // deny+systemMessage 对陷入"计划固位"失败模式的模型无效（#899 事故：
