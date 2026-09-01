@@ -34,6 +34,30 @@ export function buildDecision(decision, reason, eventName = '') {
 }
 
 /**
+ * 构造熔断决策：终止整个 Agent 回合（deny 单次调用之上的升级）。
+ *
+ * 背景：per-call deny + systemMessage 对陷入"计划固位"失败模式的模型无效
+ * （#899 事故：拦截 168 次仍重试）。hooks 协议支持 continue:false + stopReason
+ * 终止整个回合——这是模型无法忽略的强制停止信号。
+ *
+ * @param {string} reason - permissionDecisionReason（UI 审批理由）
+ * @param {string} systemMessage - 注入模型上下文的终止说明
+ * @param {string} [eventName]
+ */
+export function buildCircuitBreaker(reason, systemMessage, eventName = 'PreToolUse') {
+  return {
+    continue: false,
+    stopReason: systemMessage,
+    systemMessage,
+    hookSpecificOutput: {
+      hookEventName: eventName,
+      permissionDecision: 'deny',
+      permissionDecisionReason: reason,
+    },
+  };
+}
+
+/**
  * 构造 deny 决策。
  * @param {string} reason - permissionDecisionReason（UI 审批理由）
  * @param {string} [eventName]

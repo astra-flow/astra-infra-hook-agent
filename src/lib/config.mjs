@@ -28,6 +28,11 @@ export const HOOK_METADATA = {
     ],
     threshold: 3, // 连续 N 次相同指纹触发拦截
     maxHistory: 50,
+    // 熔断器（2026-09-01）：连续拦截达 breakerLimit 后，从 per-call deny 升级为
+    // 终止整个 Agent 回合（continue:false + stopReason）。背景：deny+systemMessage
+    // 对陷入"计划固位"失败模式的模型无效（#899 事故：拦截 168 次仍重试），
+    // 唯一无法忽略的信号是平台强制终止回合。
+    breakerLimit: 8,
   },
   'decision-log': {
     name: 'decision-log',

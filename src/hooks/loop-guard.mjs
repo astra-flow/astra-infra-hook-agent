@@ -10,7 +10,7 @@
  * 输出：allow（正常）/ deny（连续重复拦截）/ 默认 fail-open
  */
 import crypto from 'node:crypto';
-import { buildDeny, buildAllow } from '../lib/decision.mjs';
+import { buildDeny, buildAllow, buildCircuitBreaker } from '../lib/decision.mjs';
 import { updateState } from '../lib/state.mjs';
 import { isExemptTool } from '../lib/validate.mjs';
 
@@ -54,10 +54,27 @@ export default async function loopGuard(input, meta, { debug = false } = {}) {
   // 连续达到阈值 → deny（含 Agent 纠偏指引，确保 Agent 能采取行动而非盲目重试）
   if (streak >= threshold) {
     const summary = summarizeToolInput(toolInput);
+    const breakerLimit = meta.breakerLimit || 8;
+
+    // 熔断器（2026-09-01）：连续拦截达 breakerLimit → 终止整个 Agent 回合。
+    // deny+systemMessage 对陷入"计划固位"失败模式的模型无效（#899 事故：
+    // 拦截 168 次仍重试），唯一无法忽略的信号是平台强制终止回合。
+    if (streak >= breakerLimit) {
+      return buildCircuitBreaker(
+        `[防循环熔断] 工具 \`${toolName}\` 已被连续拦截 ${streak - threshold + 1} 次（相同参数第 ${streak} 次调用），Agent 回合被强制终止。\n\n` +
+        `- 最近一次参数：\`${summary}\`\n` +
+        `- 触发条件：连续 ${breakerLimit} 次拦截后仍未改变行为\n` +
+        `- 恢复方式：用户开启新回合后，必须换用不同方案或修改参数，严禁原样重试`,
+        `[astra-hook loop-guard 熔断] 工具 ${toolName} 连续 ${streak} 次相同参数调用，已拦截 ${streak - threshold + 1} 次仍未改变行为，本回合被强制终止。` +
+        `这不是故障。新回合中请换用不同方案、修改参数、或直接向用户报告阻塞——严禁原样重试。`,
+        hookEventName || 'PreToolUse'
+      );
+    }
+
     // 连续拦截升级：streak 超过阈值 2 次以上，说明 Agent 未响应纠偏指引，升级警告
     const escalation =
       streak >= threshold + 2
-        ? `\n- ⚠️ 升级警告：本工具已被连续拦截 ${streak - threshold + 1} 次，你仍未改变行为。请立即停止该工具调用，直接向用户文字报告阻塞状态。`
+        ? `\n- ⚠️ 升级警告：本工具已被连续拦截 ${streak - threshold + 1} 次，你仍未改变行为。达到 ${breakerLimit} 次将强制终止本回合。请立即停止该工具调用，直接向用户文字报告阻塞状态。`
         : '';
     return buildDeny(
       `[防循环拦截] 检测到重复执行：工具 \`${toolName}\` 已连续调用 ${streak} 次且无进展。\n\n` +
@@ -72,7 +89,8 @@ export default async function loopGuard(input, meta, { debug = false } = {}) {
       hookEventName || 'PreToolUse',
       // systemMessage：注入模型上下文，确保 Agent 拿到纠偏信息（而非只看到"被拒绝"）
       `[astra-hook loop-guard] 工具 ${toolName} 已连续 ${streak} 次以相同参数调用，本次调用已被阻止。` +
-      `这不是瞬时故障，不会因重试而恢复。请立即改变行为：换方案 / 修改参数 / 或向用户报告阻塞。`
+      `这不是瞬时故障，不会因重试而恢复。请立即改变行为：换方案 / 修改参数 / 或向用户报告阻塞。` +
+      (streak >= threshold + 2 ? ` 已连续拦截 ${streak - threshold + 1} 次，达到 ${breakerLimit} 次将强制终止本回合。` : '')
     );
   }
 
