@@ -53,6 +53,16 @@ export const HOOK_METADATA = {
     // 写入路径经配置注入（非硬编码，D8 路径防护）
     linkFile: process.env.ASTRA_SESSION_LINK_FILE || 'memories/session/issue-link.md',
   },
+  'delivery-gate': {
+    name: 'delivery-gate',
+    description: '交付门禁：SDLC artifact 存在性检查（spec.md/task-breakdown，#915）',
+    events: ['PreToolUse'],
+    timeoutMs: 5000,
+    platforms: ['vscode', 'claude-code'],
+    // 阶段声明契约：Agent 执行 /design 或 /implement 时设置 ASTRA_SDLC_PHASE
+    // 未声明 → 放行（fail-open，不误伤常规编码）
+    phaseEnv: 'ASTRA_SDLC_PHASE',
+  },
 };
 
 /**
