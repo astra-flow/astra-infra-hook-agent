@@ -57,7 +57,10 @@ export default async function loopGuard(input, meta, { debug = false } = {}) {
   // 290 次拦截仍重试。升级为 ask 强制人工审批：模型无法绕过，用户可批准/拒绝/终止）
   if (streak >= threshold) {
     const summary = summarizeToolInput(toolInput);
-    const breakerLimit = loadBands()['loop-guard']?.breakerLimit || meta.breakerLimit || 8;
+    const bands = loadBands()['loop-guard'] || {};
+    const breakerLimit = bands.breakerLimit || meta.breakerLimit || 8;
+    // 升级阈值（#957 P0）：bands.yaml askThreshold > threshold+2 兜底
+    const askThreshold = bands.askThreshold || threshold + 2;
 
     // 熔断器（#957 终态改 ask 兜底）：连续拦截达 breakerLimit → 强制人工审批。
     // 原设计为 continue:false 强制终止回合，但 #948 二次事故实证：VS Code 实际
@@ -75,9 +78,9 @@ export default async function loopGuard(input, meta, { debug = false } = {}) {
       );
     }
 
-    // 连续拦截升级：streak 超过阈值 2 次以上，说明 Agent 未响应纠偏指引，升级为 ask
+    // 连续拦截升级：streak 达到 askThreshold，说明 Agent 未响应纠偏指引，升级为 ask
     // （#957 P0：原升级警告仍为 deny 自动拦截，实证无效；ask 强制用户介入）
-    if (streak >= threshold + 2) {
+    if (streak >= askThreshold) {
       return buildAsk(
         `[防循环升级·人工审批] 工具 \`${toolName}\` 已被连续拦截 ${streak - threshold + 1} 次（相同参数第 ${streak} 次调用），Agent 未响应纠偏指引，升级为强制人工审批。\n\n` +
         `- 最近一次参数：\`${summary}\`\n` +
@@ -99,12 +102,12 @@ export default async function loopGuard(input, meta, { debug = false } = {}) {
       `  1. 改用其他工具或方案完成同一目标\n` +
       `  2. 若参数确需变化，修改参数后重试（参数变化会重置计数）\n` +
       `  3. 若确实无法推进，停止调用，向用户文字报告阻塞状态并等待指示\n` +
-      `- 注意：原样重试将被再次拦截；连续拦截 ${threshold + 2} 次后将升级为人工审批`,
+      `- 注意：原样重试将被再次拦截；连续拦截 ${askThreshold} 次后将升级为人工审批`,
       hookEventName || 'PreToolUse',
       // systemMessage：注入模型上下文，确保 Agent 拿到纠偏信息（而非只看到"被拒绝"）
       `[astra-hook loop-guard] 工具 ${toolName} 已连续 ${streak} 次以相同参数调用，本次调用已被阻止。` +
       `这不是瞬时故障，不会因重试而恢复。请立即改变行为：换方案 / 修改参数 / 或向用户报告阻塞。` +
-      ` 连续拦截 ${threshold + 2} 次后将升级为人工审批。`
+      ` 连续拦截 ${askThreshold} 次后将升级为人工审批。`
     );
   }
 
