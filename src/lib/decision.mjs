@@ -72,6 +72,24 @@ export function buildDeny(reason, eventName = 'PreToolUse', systemMessage = '') 
   return out;
 }
 
+/**
+ * 构造 ask 决策：强制人工审批（2026-09-07，#957）。
+ *
+ * 背景：deny 自动拦截对陷入"计划固位"失败模式的模型无效（#948 二次事故：
+ * add_issue_comment 被连续拦截 290 次，Agent 仍未改变行为）。VS Code hooks
+ * 官方语义中 permissionDecision: "ask" = requires user confirmation——工具
+ * 调用无法自动重试，必须由用户显式批准/拒绝，这是模型无法绕过的停止信号。
+ *
+ * @param {string} reason - permissionDecisionReason（UI 审批理由，展示给用户）
+ * @param {string} [eventName]
+ * @param {string} [systemMessage] - 注入模型上下文的说明（平台不支持则忽略）
+ */
+export function buildAsk(reason, eventName = 'PreToolUse', systemMessage = '') {
+  const out = buildDecision('ask', reason, eventName);
+  if (systemMessage) out.systemMessage = systemMessage;
+  return out;
+}
+
 /** 构造 allow/continue 决策 */
 export function buildAllow(reason = '', eventName = '') {
   return buildDecision('allow', reason, eventName);
