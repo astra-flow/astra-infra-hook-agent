@@ -57,23 +57,23 @@ test('FP: deny output includes systemMessage for agent correction', async () => 
   assert.match(r3.systemMessage, /已被阻止/);
   assert.match(r3.systemMessage, /不是瞬时故障/);
   assert.match(r3.systemMessage, /改变行为/);
-  // reason 也含可执行的纠偏选项
-  assert.match(r3.hookSpecificOutput.permissionDecisionReason, /纠偏选项/);
+  // reason 也含可执行的下一步行动（#957 P1a 正向指令）
+  assert.match(r3.hookSpecificOutput.permissionDecisionReason, /下一步行动/);
   assert.match(r3.hookSpecificOutput.permissionDecisionReason, /参数变化会重置计数/);
 });
 
-test('FP: escalation warning after repeated denials', async () => {
+test('FP: escalation to ask after repeated denials (#957)', async () => {
   const mk = () => JSON.stringify({
     sessionId: SESSION,
     toolName: 'mcp_github_mcp_se_add_issue_comment',
     toolInput: { body: 'y', issue_number: 2, owner: 'o', repo: 'r' },
     hookEventName: 'PreToolUse',
   });
-  // threshold=3：第 3/4/5 次都是 deny；第 6 次（streak=6 >= 3+2）应含升级警告
-  for (let i = 0; i < 5; i++) await run('loop-guard', mk(), {});
-  const r6 = await run('loop-guard', mk(), {});
-  assert.equal(r6.hookSpecificOutput.permissionDecision, 'deny');
-  assert.match(r6.hookSpecificOutput.permissionDecisionReason, /升级警告/);
+  // threshold=3, askThreshold=5：第 3/4 次 deny；第 5 次（streak=5）升级为 ask 人工审批
+  for (let i = 0; i < 4; i++) await run('loop-guard', mk(), {});
+  const r5 = await run('loop-guard', mk(), {});
+  assert.equal(r5.hookSpecificOutput.permissionDecision, 'ask');
+  assert.match(r5.hookSpecificOutput.permissionDecisionReason, /人工审批/);
 });
 
 test('FP: changed args reset streak (correction contract works)', async () => {

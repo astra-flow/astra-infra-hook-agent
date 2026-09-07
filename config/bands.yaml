@@ -22,6 +22,7 @@ sigma:
     description: 允许行动（可开 PR 进评审门禁，或触发预批准 runbook）
 
 loop-guard:
-  threshold: 3
-  breakerLimit: 8
+  threshold: 3        # 首次拦截（deny + 正向指令）
+  askThreshold: 5     # 升级人工审批（threshold+2，#957 P0）
+  breakerLimit: 8     # 熔断兜底（ask，#957 P1b）
   maxHistory: 50

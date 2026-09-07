@@ -10,7 +10,7 @@
  * 输出：allow（正常）/ deny（连续重复拦截）/ 默认 fail-open
  */
 import crypto from 'node:crypto';
-import { buildDeny, buildAllow, buildCircuitBreaker } from '../lib/decision.mjs';
+import { buildDeny, buildAsk, buildAllow, buildCircuitBreaker } from '../lib/decision.mjs';
 import { updateState } from '../lib/state.mjs';
 import { isExemptTool } from '../lib/validate.mjs';
 import { loadBands } from '../lib/config.mjs';
@@ -53,46 +53,61 @@ export default async function loopGuard(input, meta, { debug = false } = {}) {
 
   const streak = state?.streak || 1;
 
-  // 连续达到阈值 → deny（含 Agent 纠偏指引，确保 Agent 能采取行动而非盲目重试）
+  // 连续达到阈值 → 拦截（#957：deny 自动拦截对计划固位失败模式无效——#948 二次事故
+  // 290 次拦截仍重试。升级为 ask 强制人工审批：模型无法绕过，用户可批准/拒绝/终止）
   if (streak >= threshold) {
     const summary = summarizeToolInput(toolInput);
-    const breakerLimit = loadBands()['loop-guard']?.breakerLimit || meta.breakerLimit || 8;
+    const bands = loadBands()['loop-guard'] || {};
+    const breakerLimit = bands.breakerLimit || meta.breakerLimit || 8;
+    // 升级阈值（#957 P0）：bands.yaml askThreshold > threshold+2 兜底
+    const askThreshold = bands.askThreshold || threshold + 2;
 
-    // 熔断器（2026-09-01）：连续拦截达 breakerLimit → 终止整个 Agent 回合。
-    // deny+systemMessage 对陷入"计划固位"失败模式的模型无效（#899 事故：
-    // 拦截 168 次仍重试），唯一无法忽略的信号是平台强制终止回合。
+    // 熔断器（#957 终态改 ask 兜底）：连续拦截达 breakerLimit → 强制人工审批。
+    // 原设计为 continue:false 强制终止回合，但 #948 二次事故实证：VS Code 实际
+    // 环境中熔断未能终止回合（Agent 熔断后仍重试至 290 次）。ask 是平台语义中
+    // 唯一无法被模型自动绕过的停止信号——工具调用挂起等待用户确认。
     if (streak >= breakerLimit) {
-      return buildCircuitBreaker(
-        `[防循环熔断] 工具 \`${toolName}\` 已被连续拦截 ${streak - threshold + 1} 次（相同参数第 ${streak} 次调用），Agent 回合被强制终止。\n\n` +
+      return buildAsk(
+        `[防循环熔断·人工审批] 工具 \`${toolName}\` 已被连续拦截 ${streak - threshold + 1} 次（相同参数第 ${streak} 次调用），升级为强制人工审批。\n\n` +
         `- 最近一次参数：\`${summary}\`\n` +
         `- 触发条件：连续 ${breakerLimit} 次拦截后仍未改变行为\n` +
-        `- 恢复方式：用户开启新回合后，必须换用不同方案或修改参数，严禁原样重试`,
-        `[astra-hook loop-guard 熔断] 工具 ${toolName} 连续 ${streak} 次相同参数调用，已拦截 ${streak - threshold + 1} 次仍未改变行为，本回合被强制终止。` +
-        `这不是故障。新回合中请换用不同方案、修改参数、或直接向用户报告阻塞——严禁原样重试。`,
-        hookEventName || 'PreToolUse'
+        `- 建议：拒绝本次调用，并要求 Agent 换用不同方案或直接报告阻塞状态`,
+        hookEventName || 'PreToolUse',
+        `[astra-hook loop-guard 熔断] 工具 ${toolName} 连续 ${streak} 次相同参数调用，已拦截 ${streak - threshold + 1} 次仍未改变行为，本次调用已升级为人工审批。` +
+        `这不是瞬时故障，不会因重试而恢复。请立即停止该工具调用：换用不同方案、修改参数、或直接向用户文字报告阻塞状态——严禁原样重试。`
       );
     }
 
-    // 连续拦截升级：streak 超过阈值 2 次以上，说明 Agent 未响应纠偏指引，升级警告
-    const escalation =
-      streak >= threshold + 2
-        ? `\n- ⚠️ 升级警告：本工具已被连续拦截 ${streak - threshold + 1} 次，你仍未改变行为。达到 ${breakerLimit} 次将强制终止本回合。请立即停止该工具调用，直接向用户文字报告阻塞状态。`
-        : '';
+    // 连续拦截升级：streak 达到 askThreshold，说明 Agent 未响应纠偏指引，升级为 ask
+    // （#957 P0：原升级警告仍为 deny 自动拦截，实证无效；ask 强制用户介入）
+    if (streak >= askThreshold) {
+      return buildAsk(
+        `[防循环升级·人工审批] 工具 \`${toolName}\` 已被连续拦截 ${streak - threshold + 1} 次（相同参数第 ${streak} 次调用），Agent 未响应纠偏指引，升级为强制人工审批。\n\n` +
+        `- 最近一次参数：\`${summary}\`\n` +
+        `- 达到 ${breakerLimit} 次将保持人工审批直至行为改变\n` +
+        `- 建议：拒绝本次调用，并要求 Agent 换用不同方案或直接报告阻塞状态`,
+        hookEventName || 'PreToolUse',
+        `[astra-hook loop-guard 升级] 工具 ${toolName} 已连续拦截 ${streak - threshold + 1} 次仍未改变行为，本次调用需用户确认。` +
+        `这不是瞬时故障，不会因重试而恢复。请立即停止该工具调用：换用不同方案、修改参数、或直接向用户文字报告阻塞状态——严禁原样重试。`
+      );
+    }
+
+    // 首次拦截（streak == threshold）：保留 deny + 正向指令（#957 P1a：
+    // 业界 loop-breaker 采用正向措辞，明确告知替代动作而非否定式警告）
     return buildDeny(
       `[防循环拦截] 检测到重复执行：工具 \`${toolName}\` 已连续调用 ${streak} 次且无进展。\n\n` +
       `- 最近一次参数：\`${summary}\`\n` +
       `- 原因：相同工具 + 相同参数重复执行，疑似陷入死循环\n` +
-      `- 纠偏选项（任选其一）：\n` +
+      `- 下一步行动（任选其一）：\n` +
       `  1. 改用其他工具或方案完成同一目标\n` +
       `  2. 若参数确需变化，修改参数后重试（参数变化会重置计数）\n` +
       `  3. 若确实无法推进，停止调用，向用户文字报告阻塞状态并等待指示\n` +
-      `- 禁止：原样重试（会再次被拦截）或仅微调措辞后重试同一操作` +
-      escalation,
+      `- 注意：原样重试将被再次拦截；连续拦截 ${askThreshold} 次后将升级为人工审批`,
       hookEventName || 'PreToolUse',
       // systemMessage：注入模型上下文，确保 Agent 拿到纠偏信息（而非只看到"被拒绝"）
       `[astra-hook loop-guard] 工具 ${toolName} 已连续 ${streak} 次以相同参数调用，本次调用已被阻止。` +
       `这不是瞬时故障，不会因重试而恢复。请立即改变行为：换方案 / 修改参数 / 或向用户报告阻塞。` +
-      (streak >= threshold + 2 ? ` 已连续拦截 ${streak - threshold + 1} 次，达到 ${breakerLimit} 次将强制终止本回合。` : '')
+      ` 连续拦截 ${askThreshold} 次后将升级为人工审批。`
     );
   }
 

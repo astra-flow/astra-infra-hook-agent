@@ -37,6 +37,16 @@ async function main() {
     process.exit(0);
   }
 
+  // EPIPE 防护（#957 覆盖率探查发现的真实缺陷）：VS Code 关闭管道时
+  // process.stdout.write 触发 stream 'error' 事件（非 throw），main().catch
+  // 兜不住，进程非零退出 → VS Code 对 PreToolUse 非零退出默认 deny 工具调用，
+  // 违反 fail-open 契约。EPIPE → exit 0；其他错误 → 记录后仍 exit 0（fail-open
+  // 优先于错误上报：hook 的职责是绝不阻塞正常工具调用）。
+  process.stdout.on('error', (err) => {
+    console.error(`[astra-hook] stdout error: ${err.code || err.message}, fail-open`);
+    process.exit(0);
+  });
+
   const stdin = await readStdin();
   const result = await run(hookName, stdin, { debug });
 

@@ -11,14 +11,23 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-/** 状态根目录（可被 env 覆盖，便于测试） */
-const STATE_ROOT = process.env.ASTRA_HOOK_STATE_DIR
-  ? path.resolve(process.env.ASTRA_HOOK_STATE_DIR)
-  : path.join(os.homedir(), '.astra', 'hooks');
+/**
+ * 状态根目录（动态读取 env，#957 修复）。
+ *
+ * 历史缺陷：曾为模块加载期 const —— ESM import 提升导致测试文件在 import 后
+ * 设置的 ASTRA_HOOK_STATE_DIR 不生效，测试状态泄漏到真实 ~/.astra/hooks/
+ * （实证：ask-test-session.json 泄漏，streak 跨测试累积造成误判）。
+ * 改为每次调用动态读取，测试/多环境隔离生效。
+ */
+function getStateRoot() {
+  return process.env.ASTRA_HOOK_STATE_DIR
+    ? path.resolve(process.env.ASTRA_HOOK_STATE_DIR)
+    : path.join(os.homedir(), '.astra', 'hooks');
+}
 
 /** 状态文件命名：<name>/<sessionId>.json */
 function stateFilePath(name, sessionId) {
-  return path.join(STATE_ROOT, name, `${sanitizeId(sessionId)}.json`);
+  return path.join(getStateRoot(), name, `${sanitizeId(sessionId)}.json`);
 }
 
 /** 会话 ID 消毒：只保留安全字符，防止路径穿越 */
@@ -106,4 +115,7 @@ export function clearState(name, sessionId) {
   } catch { /* noop */ }
 }
 
-export { STATE_ROOT };
+/** 状态根目录（动态读取，供测试断言/运维排查） */
+export function stateRoot() {
+  return getStateRoot();
+}
