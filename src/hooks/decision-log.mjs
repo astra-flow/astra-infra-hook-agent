@@ -8,9 +8,21 @@
  *   - async（CP-03）：后台执行不阻塞；gh 缺失/解析失败 → fail-open
  *
  * 输出：UserPromptSubmit 仅通用输出（continue），本 hook 依赖副作用。
+ *
+ * #958 修复（2026-09-07，全量审计 19 Issue/87 条评论确认四类缺陷）：
+ *   - AC1 极性正确：否定语义优先判定（"不同意"不再命中"同意"）；
+ *     疑问句（？/? 结尾或含吗/么/呢）不触发决策记录
+ *   - AC2 来源标注：子代理任务书（"你是XX"开头）与 Agent 生成消息
+ *     （"Analysis approved by user"等）不记录
+ *   - AC3 去重：同 Issue + 同内容（归一化后）120s 窗口内不重复发布
+ *   - AC4 归属可信：分支兜底来源的评论显著标注"可能串 Issue"
  */
 import { execFile, execFileSync } from 'node:child_process';
 import { buildAllow } from '../lib/decision.mjs';
+import { readState, updateState } from '../lib/state.mjs';
+
+/** 去重窗口（毫秒）：同 Issue + 同内容在此窗口内不重复发布 */
+export const DEDUP_WINDOW_MS = 120_000;
 
 /**
  * @param {object} input - 归一化输入（camelCase）
@@ -20,17 +32,28 @@ export default async function decisionLog(input, meta, { debug = false } = {}) {
   const prompt = input.prompt || '';
   if (!prompt) return buildAllow('decision-log: no prompt');
 
-  // 决策分类（正则预编译缓存，perf Low 修复）
+  // AC2 来源过滤：非用户决策不记录（子代理任务书 / Agent 生成消息）
+  const source = classifySource(prompt);
+  if (source === 'agent-generated') {
+    return buildAllow('decision-log: agent-generated prompt, skip');
+  }
+
+  // AC1 极性判定：先排除疑问句，再做关键词分类
+  if (isInterrogative(prompt)) {
+    return buildAllow('decision-log: interrogative prompt, skip');
+  }
+
   const classification = classifyDecision(prompt, meta);
   if (!classification) return buildAllow('decision-log: no decision keyword');
 
   // 提取 Issue 编号：仅同步做纯字符串正则；git 分支名兜底移入后台（perf Medium 修复）
   let issueNum = extractIssueNumberSync(prompt);
+  let resolvedBy = issueNum ? 'prompt' : null;
   if (!issueNum) {
     // 无编号 → 后台尝试分支名兜底；主流程先返回（避免同步 git 阻塞）
     setImmediate(() => {
       const branchNum = extractFromBranch();
-      if (branchNum) postComment(branchNum, classification, prompt, meta, { debug });
+      if (branchNum) postComment(branchNum, classification, prompt, meta, { debug, resolvedBy: 'branch', source });
     });
     return buildAllow('decision-log: scheduled branch-resolve');
   }
@@ -38,7 +61,7 @@ export default async function decisionLog(input, meta, { debug = false } = {}) {
   // async 后台评论（CP-03）：setImmediate 让调用方先返回决策；
   // bin 入口用 process.exitCode=0（非 exit()），事件循环会等回调执行完（async 失效修复）
   setImmediate(() => {
-    postComment(issueNum, classification, prompt, meta, { debug });
+    postComment(issueNum, classification, prompt, meta, { debug, resolvedBy, source });
   });
 
   return buildAllow('decision-log: scheduled comment');
@@ -61,11 +84,17 @@ function classifyDecision(prompt, meta) {
   const pos = meta.positivePatterns || [];
   const neg = meta.negativePatterns || [];
 
-  for (const p of pos) {
-    if (compilePattern(p).test(prompt)) return { type: '正向决策', label: describePositive(p) };
-  }
+  // AC1 否定语义优先：反向模式先于正向匹配。
+  // "不同意"包含"同意"——必须先检查否定形态，防止极性反转（#949 04:11:54 事故）。
   for (const p of neg) {
     if (compilePattern(p).test(prompt)) return { type: '反向决策', label: describeNegative(p) };
+  }
+  // 否定前缀 + 正向词 → 非决策（语义已否定，如"不同意把OAuth放到efficiency下面"）
+  if (/(不同意|不通过|不批准|不认可|不支持)/.test(prompt)) {
+    return null;
+  }
+  for (const p of pos) {
+    if (compilePattern(p).test(prompt)) return { type: '正向决策', label: describePositive(p) };
   }
   return null;
 }
@@ -119,16 +148,86 @@ function sanitizePrompt(prompt) {
   return s;
 }
 
-/** 评论到 Issue（gh CLI，失败静默；execFile 带 timeout） */
-function postComment(issueNum, classification, prompt, meta, { debug = false }) {
+/**
+ * AC2 来源分类：区分用户输入与 Agent 生成内容。
+ * - 子代理任务书：以"你是"开头的角色指派（"你是性能评审子代理…"）
+ * - Agent 生成消息：Agent 自行宣布的决策/状态（"Analysis approved by user"等）
+ * 返回 'user' | 'agent-generated'
+ */
+export function classifySource(prompt) {
+  const s = String(prompt || '').trim();
+  // 子代理任务书：开头即角色指派
+  if (/^你是/.test(s)) return 'agent-generated';
+  // Agent 生成消息：固定模板短语（Agent 宣布决策，非用户输入）
+  if (/^(Analysis approved by user|Architecture design approved by user|Design rejected or needs revision)/.test(s)) {
+    return 'agent-generated';
+  }
+  return 'user';
+}
+
+/**
+ * AC1 疑问句过滤：以？/? 结尾，或疑问语气词（吗/么/呢）后接问号。
+ * 疑问句是澄清/确认请求，不是决策（"评审通过了么？"、"你确认正常吗？"）。
+ */
+export function isInterrogative(prompt) {
+  const s = String(prompt || '').trim();
+  if (/[？?]\s*$/.test(s)) return true;
+  // 句中疑问语气词 + 后续问号（多句 prompt 中疑问子句主导语义）
+  if (/[吗么呢][^。！!]*[？?]/.test(s)) return true;
+  return false;
+}
+
+/** 评论内容归一化（AC3 去重键）：去除全部空白差异，保留语义 */
+function normalizeForDedup(prompt) {
+  return String(prompt || '').trim().replace(/\s+/g, '');
+}
+
+/**
+ * AC3 去重检查：同 Issue + 同内容（归一化）在 DEDUP_WINDOW_MS 内已发布 → true。
+ * 状态存 <stateRoot>/decision-log-dedup/<sessionId>.json（复用 state.mjs 原子写）。
+ */
+export async function isDuplicate(sessionId, issueNum, prompt, { now = Date.now() } = {}) {
+  const key = `${issueNum}:${normalizeForDedup(prompt)}`;
+  const prev = await readState('decision-log-dedup', sessionId);
+  const history = (prev && Array.isArray(prev.entries)) ? prev.entries : [];
+  if (history.some((e) => e.key === key && now - e.at < DEDUP_WINDOW_MS)) {
+    return true;
+  }
+  // 滑动清理：只保留窗口内的记录，防状态膨胀
+  const entries = history.filter((e) => now - e.at < DEDUP_WINDOW_MS);
+  entries.push({ key, at: now });
+  await updateState('decision-log-dedup', sessionId, () => ({ entries }));
+  return false;
+}
+
+/**
+ * 评论到 Issue（gh CLI，失败静默；execFile 带 timeout）。
+ * @param {string} resolvedBy - Issue 编号来源：'prompt' | 'branch'
+ */
+async function postComment(issueNum, classification, prompt, meta, { debug = false, resolvedBy = 'prompt', source = 'user' } = {}) {
   const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
   const branch = extractFromBranch() || '未知';
 
+  // AC4 归属可信标注：分支兜底来源在多会话共享 worktree 下可能串 Issue
+  // （#953 事故：#944 会话的决策因分支被切到 feature/sot-subscription-953 而误发）
+  const attributionNote = resolvedBy === 'branch'
+    ? '\n- ⚠️ **归属来源：分支名兜底**——多会话共享工作区时分支可能不代表本会话工作 Issue，此评论归属需人工复核'
+    : '';
+  const sourceNote = source === 'agent-generated' ? '（agent-generated）' : '';
+
   const body =
-    `**用户${classification.type}：${classification.label}**（${timestamp}）\n\n` +
+    `**用户${classification.type}：${classification.label}**${sourceNote}（${timestamp}）\n\n` +
     `> ${sanitizePrompt(prompt)}\n\n---\n` +
     `- 分支：\`${branch}\`\n` +
+    `- Issue 归属来源：${resolvedBy === 'branch' ? '分支名兜底' : 'prompt 提取'}${attributionNote}\n` +
     `- 来源：UserPromptSubmit hook 自动记录（astra-hook decision-log）`;
+
+  // AC3 去重：窗口内同 Issue + 同内容不重复发布（#881 x4 / #900 x10 事故）
+  const sessionId = meta.sessionId || 'default';
+  if (await isDuplicate(sessionId, issueNum, prompt)) {
+    if (debug) console.error('[decision-log] duplicate comment suppressed (dedup window)');
+    return;
+  }
 
   const child = execFile('gh', ['issue', 'comment', issueNum, '--body', body], { timeout: 10000 }, (err) => {
     if (debug && err) console.error(`[decision-log] gh comment failed: ${err.message}`);
