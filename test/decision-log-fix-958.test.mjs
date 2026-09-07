@@ -24,6 +24,7 @@ import decisionLog, {
   classifySource,
   isInterrogative,
   isDuplicate,
+  resolveFromSessionLink,
   DEDUP_WINDOW_MS,
 } from '../src/hooks/decision-log.mjs';
 import { HOOK_METADATA } from '../src/lib/config.mjs';
@@ -217,6 +218,81 @@ test('AC4: prompt 提取路径 resolvedBy=prompt（评论体不含警示）', as
   );
   // prompt 路径：resolvedBy='prompt' → attributionNote 为空串
   assert.match(src, /resolvedBy = issueNum \? 'prompt' : null/);
+});
+
+// ---------- P2：会话关联优先级链 ----------
+
+test('P2: resolveFromSessionLink — 取该会话最后一条关联记录', () => {
+  const linkFile = path.join(TEST_STATE, 'p2-link.md');
+  fs.writeFileSync(linkFile, [
+    '- 2026-09-07 08:00:00 | SessionStart | session=p2-s1 | issue=#111',
+    '- 2026-09-07 08:05:00 | PostToolUse | session=p2-s1 | issue=#222',
+    '- 2026-09-07 08:06:00 | SessionStart | session=p2-s2 | issue=#333',
+    '- 2026-09-07 08:07:00 | SessionStart | session=p2-other | issue=#444',
+  ].join('\n'), 'utf8');
+  process.env.ASTRA_SESSION_LINK_FILE = linkFile;
+  process.env.ASTRA_WORKSPACE_ROOT = TEST_STATE;
+  try {
+    assert.equal(resolveFromSessionLink('p2-s1', meta), '222', 'last record for session wins');
+    assert.equal(resolveFromSessionLink('p2-s2', meta), '333');
+    assert.equal(resolveFromSessionLink('p2-nonexistent', meta), null, 'unknown session → null');
+  } finally {
+    delete process.env.ASTRA_SESSION_LINK_FILE;
+  }
+});
+
+test('P2: resolveFromSessionLink — 文件缺失/路径不安全/格式异常容错', () => {
+  process.env.ASTRA_SESSION_LINK_FILE = path.join(TEST_STATE, 'nonexistent-link.md');
+  process.env.ASTRA_WORKSPACE_ROOT = TEST_STATE;
+  try {
+    assert.equal(resolveFromSessionLink('p2-x', meta), null, 'missing file → null');
+    // 无 linkFile 配置
+    assert.equal(resolveFromSessionLink('p2-x', {}), null, 'no linkFile config → null');
+    // 行格式异常（无 issue 编号）
+    fs.writeFileSync(path.join(TEST_STATE, 'p2-bad.md'), '- ts | SessionStart | session=p2-x | issue=#\n', 'utf8');
+    process.env.ASTRA_SESSION_LINK_FILE = path.join(TEST_STATE, 'p2-bad.md');
+    assert.equal(resolveFromSessionLink('p2-x', meta), null, 'malformed line → null');
+  } finally {
+    delete process.env.ASTRA_SESSION_LINK_FILE;
+  }
+});
+
+test('P2: 优先级链 — prompt #N > 会话关联 > 分支兜底（run 链路）', async () => {
+  const { run } = await import('../src/runtime.mjs');
+  const linkFile = path.join(TEST_STATE, 'p2-link2.md');
+  fs.writeFileSync(linkFile, '- 2026-09-07 09:00:00 | SessionStart | session=p2-chain | issue=#8888\n', 'utf8');
+  process.env.ASTRA_SESSION_LINK_FILE = linkFile;
+  process.env.ASTRA_WORKSPACE_ROOT = TEST_STATE;
+  try {
+    // 1) prompt 显式 #N 优先：即使会话关联存在，也走 prompt 提取
+    const r1 = await run('decision-log', JSON.stringify({
+      sessionId: 'p2-chain',
+      prompt: '确认合并 #9999',
+      hookEventName: 'UserPromptSubmit',
+    }), {});
+    assert.match(r1.hookSpecificOutput.permissionDecisionReason, /scheduled comment/);
+    await new Promise((res) => setImmediate(res));
+
+    // 2) 无 prompt 编号 → 会话关联命中（后台解析，不阻塞决策返回）
+    const r2 = await run('decision-log', JSON.stringify({
+      sessionId: 'p2-chain',
+      prompt: '确认合并',
+      hookEventName: 'UserPromptSubmit',
+    }), {});
+    assert.match(r2.hookSpecificOutput.permissionDecisionReason, /session-resolve/);
+    await new Promise((res) => setTimeout(res, 100));
+
+    // 3) 会话关联也无 → 分支兜底（当前分支尾号 958）
+    const r3 = await run('decision-log', JSON.stringify({
+      sessionId: 'p2-no-link',
+      prompt: '确认合并',
+      hookEventName: 'UserPromptSubmit',
+    }), {});
+    assert.match(r3.hookSpecificOutput.permissionDecisionReason, /session-resolve/);
+    await new Promise((res) => setTimeout(res, 100));
+  } finally {
+    delete process.env.ASTRA_SESSION_LINK_FILE;
+  }
 });
 
 // ---------- 端到端：run() 链路 ----------

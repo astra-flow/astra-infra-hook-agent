@@ -18,11 +18,45 @@
  *   - AC4 归属可信：分支兜底来源的评论显著标注"可能串 Issue"
  */
 import { execFile, execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { buildAllow } from '../lib/decision.mjs';
 import { readState, updateState } from '../lib/state.mjs';
 
 /** 去重窗口（毫秒）：同 Issue + 同内容在此窗口内不重复发布 */
 export const DEDUP_WINDOW_MS = 120_000;
+
+/**
+ * P2：从 session-issue-link 记录解析当前会话关联的 Issue 编号。
+ *
+ * session-issue-link hook 在 SessionStart/PostToolUse(issue_write) 时追加记录到
+ * linkFile（格式：`- <ts> | <event> | session=<id> | issue=#N`）。
+ * 本函数取该 sessionId 的**最后一条**记录作为会话关联 Issue。
+ *
+ * 优先级：prompt 显式 #N > 会话关联 > 分支名兜底（#953 事故根因降级为末位）。
+ *
+ * @param {string} sessionId - 当前会话 ID
+ * @param {object} meta - hook 元数据（含 linkFile 配置）
+ * @returns {string|null} Issue 编号字符串，无关联返回 null
+ */
+export function resolveFromSessionLink(sessionId, meta) {
+  try {
+    const linkFile = process.env.ASTRA_SESSION_LINK_FILE || meta.linkFile;
+    if (!linkFile) return null;
+    const absPath = path.isAbsolute(linkFile)
+      ? linkFile
+      : path.join(process.env.ASTRA_WORKSPACE_ROOT || process.cwd(), linkFile);
+    const raw = fs.readFileSync(absPath, 'utf8');
+    const safeSession = String(sessionId || '').replace(/[\r\n\u0000-\u001F]/g, '_');
+    const lines = raw.split('\n').filter((l) => l.includes(`session=${safeSession} | issue=#`));
+    if (lines.length === 0) return null;
+    const last = lines[lines.length - 1];
+    const m = last.match(/issue=#(\d+)/);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * @param {object} input - 归一化输入（camelCase）
@@ -46,16 +80,24 @@ export default async function decisionLog(input, meta, { debug = false } = {}) {
   const classification = classifyDecision(prompt, meta);
   if (!classification) return buildAllow('decision-log: no decision keyword');
 
-  // 提取 Issue 编号：仅同步做纯字符串正则；git 分支名兜底移入后台（perf Medium 修复）
+  // 提取 Issue 编号（P2 优先级链）：prompt 显式 #N > 会话关联（session-issue-link）> 分支名兜底
+  // 同步部分仅纯字符串正则；会话关联读文件与 git 分支名兜底移入后台（perf Medium 修复）
   let issueNum = extractIssueNumberSync(prompt);
   let resolvedBy = issueNum ? 'prompt' : null;
   if (!issueNum) {
-    // 无编号 → 后台尝试分支名兜底；主流程先返回（避免同步 git 阻塞）
-    setImmediate(() => {
-      const branchNum = extractFromBranch();
-      if (branchNum) postComment(branchNum, classification, prompt, meta, { debug, resolvedBy: 'branch', source });
+    // 无编号 → 后台解析会话关联/分支名兜底；主流程先返回（避免同步 IO 阻塞）
+    const sessionId = input.sessionId || '';
+    setImmediate(async () => {
+      // P2：优先会话关联（多会话共享 worktree 下比分支名可信）
+      let num = resolveFromSessionLink(sessionId, meta);
+      let by = 'session-link';
+      if (!num) {
+        num = extractFromBranch();
+        by = 'branch';
+      }
+      if (num) postComment(num, classification, prompt, meta, { debug, resolvedBy: by, source });
     });
-    return buildAllow('decision-log: scheduled branch-resolve');
+    return buildAllow('decision-log: scheduled session-resolve');
   }
 
   // async 后台评论（CP-03）：setImmediate 让调用方先返回决策；
@@ -208,18 +250,21 @@ async function postComment(issueNum, classification, prompt, meta, { debug = fal
   const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
   const branch = extractFromBranch() || '未知';
 
-  // AC4 归属可信标注：分支兜底来源在多会话共享 worktree 下可能串 Issue
+  // AC4 归属可信标注：非 prompt 来源在多会话共享 worktree 下可能串 Issue
   // （#953 事故：#944 会话的决策因分支被切到 feature/sot-subscription-953 而误发）
+  // P2：session-link 来源可信度高于 branch，但仍非显式声明，保留提示
   const attributionNote = resolvedBy === 'branch'
     ? '\n- ⚠️ **归属来源：分支名兜底**——多会话共享工作区时分支可能不代表本会话工作 Issue，此评论归属需人工复核'
-    : '';
+    : resolvedBy === 'session-link'
+      ? '\n- ℹ️ **归属来源：会话关联**（session-issue-link 记录）——非 prompt 显式声明，如归属有误请反馈至 #958'
+      : '';
   const sourceNote = source === 'agent-generated' ? '（agent-generated）' : '';
 
   const body =
     `**用户${classification.type}：${classification.label}**${sourceNote}（${timestamp}）\n\n` +
     `> ${sanitizePrompt(prompt)}\n\n---\n` +
     `- 分支：\`${branch}\`\n` +
-    `- Issue 归属来源：${resolvedBy === 'branch' ? '分支名兜底' : 'prompt 提取'}${attributionNote}\n` +
+    `- Issue 归属来源：${resolvedBy === 'branch' ? '分支名兜底' : resolvedBy === 'session-link' ? '会话关联' : 'prompt 提取'}${attributionNote}\n` +
     `- 来源：UserPromptSubmit hook 自动记录（astra-hook decision-log）`;
 
   // AC3 去重：窗口内同 Issue + 同内容不重复发布（#881 x4 / #900 x10 事故）
