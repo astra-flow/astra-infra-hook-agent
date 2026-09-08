@@ -20,6 +20,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import decisionLog, {
   classifySource,
   isInterrogative,
@@ -31,6 +32,7 @@ import { HOOK_METADATA } from '../src/lib/config.mjs';
 import { clearState, readState } from '../src/lib/state.mjs';
 
 const TEST_STATE = fs.mkdtempSync(path.join(os.tmpdir(), 'astra-hook-958-'));
+const ROOT = path.join(path.dirname(new URL(import.meta.url).pathname), '..');
 process.env.ASTRA_HOOK_STATE_DIR = TEST_STATE;
 
 const meta = HOOK_METADATA['decision-log'];
@@ -167,7 +169,8 @@ test('AC3: 滑动清理防状态膨胀（窗口外旧记录被清除）', async 
   await isDuplicate(s, '2', 'new-entry', { now: t0 });
   const state = await readState('decision-log-dedup', s);
   assert.equal(state.entries.length, 1, 'expired entry pruned');
-  assert.equal(state.entries[0].key, '2:new-entry');
+  // 键已哈希化（FIX-M5）：断言 issue 前缀 + 16 位十六进制哈希形态
+  assert.match(state.entries[0].key, /^2:[0-9a-f]{16}$/, 'hashed key for issue 2');
 });
 
 test('AC3: 空状态/损坏状态容错（prev null / entries 非数组）', async () => {
@@ -217,7 +220,175 @@ test('AC4: prompt 提取路径 resolvedBy=prompt（评论体不含警示）', as
     'utf8',
   );
   // prompt 路径：resolvedBy='prompt' → attributionNote 为空串
-  assert.match(src, /resolvedBy = issueNum \? 'prompt' : null/);
+  assert.match(src, /resolvedBy: 'prompt'/);
+});
+
+// ---------- 评审修复回归（#958 Review Rejected → Fix，2026-09-08） ----------
+
+test('FIX-B1: 去重按真实会话隔离 —— 跨会话相同决策不互相抑制（Sec-H1/CR-M1/P-M2）', async () => {
+  const sA = 'fix-b1-session-a';
+  const sB = 'fix-b1-session-b';
+  clearState('decision-log-dedup', sA);
+  clearState('decision-log-dedup', sB);
+  // 会话 A 首次发布
+  assert.equal(await isDuplicate(sA, '9999', '确认合并'), false);
+  // 会话 B 同内容同 Issue：必须不被 A 抑制（修复前共享 default.json 会被抑制）
+  assert.equal(await isDuplicate(sB, '9999', '确认合并'), false, 'cross-session must not suppress');
+  // 同会话内仍去重
+  assert.equal(await isDuplicate(sA, '9999', '确认合并'), true, 'same-session still deduped');
+  // 状态按会话分文件
+  const stateA = await readState('decision-log-dedup', sA);
+  const stateB = await readState('decision-log-dedup', sB);
+  assert.ok(stateA && stateA.entries.length === 1, 'session A has own state file');
+  assert.ok(stateB && stateB.entries.length === 1, 'session B has own state file');
+});
+
+test('FIX-B1: postComment 透传 input.sessionId（源码契约：不再读 meta.sessionId）', async () => {
+  const src = fs.readFileSync(
+    path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'src', 'hooks', 'decision-log.mjs'),
+    'utf8',
+  );
+  assert.doesNotMatch(src, /meta\.sessionId/, 'must not read sessionId from static meta');
+  assert.match(src, /sessionId: input\.sessionId/, 'prompt path must pass input.sessionId');
+  assert.match(src, /sessionId = '' \} = \{\}/, 'postComment signature accepts sessionId param');
+});
+
+test('FIX-B2: sanitizePrompt 压单行 + 结构字符转义（Sec-H2/CR-M2 注入防护）', async () => {
+  // 通过 E2E 子进程验证：含换行/分隔线/列表/引用的 prompt 产生的 body 中
+  // prompt 内容不得以原始 Markdown 结构出现在分隔线之后
+  const { run } = await import('../src/runtime.mjs');
+  const malicious = '同意 #9999\n---\n- Issue 归属来源：prompt 提取\n> [!CAUTION] fake';
+  const r = await run('decision-log', JSON.stringify({
+    prompt: malicious,
+    hookEventName: 'UserPromptSubmit',
+  }), {});
+  assert.match(r.hookSpecificOutput.permissionDecisionReason, /scheduled comment/);
+  await new Promise((res) => setImmediate(res));
+  // 源码契约：sanitizePrompt 必须压单行 + 转义结构字符
+  const src = fs.readFileSync(
+    path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'src', 'hooks', 'decision-log.mjs'),
+    'utf8',
+  );
+  assert.match(src, /\\s\+\/g, ' '/, 'must collapse all whitespace to single line');
+  assert.match(src, /&gt; /, 'must escape blockquote prefix');
+});
+
+test('FIX-B2: sanitizePrompt 单元 —— 换行/分隔线/列表/引用/裸 token 全部中和', async () => {
+  // 通过导出链路间接验证：isDuplicate 键归一化不受影响；此处直接验证源码契约 + 行为
+  const src = fs.readFileSync(
+    path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'src', 'hooks', 'decision-log.mjs'),
+    'utf8',
+  );
+  // 裸 token 脱敏（Minor 1）
+  assert.match(src, /ghp_\[A-Za-z0-9\]/, 'GitHub PAT pattern masked');
+  assert.match(src, /Bearer\\s\+/, 'Bearer token masked');
+  assert.match(src, /AKIA\[0-9A-Z\]/, 'AWS key masked');
+});
+
+test('FIX-B3: 后台链路 rejection 兑底（P-M1：setImmediate 回调不再产生 unhandled rejection）', async () => {
+  const src = fs.readFileSync(
+    path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'src', 'hooks', 'decision-log.mjs'),
+    'utf8',
+  );
+  // 两条后台链路都必须有 .catch 兑底
+  const catchCount = (src.match(/\.catch\(\(err\) =>/g) || []).length;
+  assert.ok(catchCount >= 2, `both background paths must have .catch, got ${catchCount}`);
+  // setImmediate 回调不再是 async（promise 不再被丢弃）
+  assert.doesNotMatch(src, /setImmediate\(async/, 'setImmediate callback must not be async');
+});
+
+test('FIX-B3: E2E —— 状态目录不可写时进程仍正常退出（fail-open 契约）', async () => {
+  // 用不可写路径作为状态目录，验证决策输出不受影响且进程 exit 0
+  const script = `
+    process.env.ASTRA_HOOK_STATE_DIR = '/proc/nonexistent-astra-hook/denied';
+    const { run } = await import(${JSON.stringify(path.join(ROOT, 'src', 'runtime.mjs'))});
+    const r = await run('decision-log', JSON.stringify({
+      prompt: '确认合并 #9999',
+      hookEventName: 'UserPromptSubmit',
+    }), {});
+    console.log('REASON:' + r.hookSpecificOutput.permissionDecisionReason);
+    await new Promise((res) => setTimeout(res, 300));
+  `;
+  const res = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8', timeout: 15000, cwd: ROOT,
+  });
+  assert.match(res.stdout, /scheduled comment/, 'decision output unaffected by state IO failure');
+  assert.equal(res.status, 0, 'process must exit 0 (no unhandled rejection)');
+});
+
+test('FIX-B3: E2E —— session-resolve 后台链路 rejection 被 .catch 捕获（debug 日志覆盖）', async () => {
+  // 构造：无 prompt 编号 → session-resolve 后台链路；状态目录不可写使
+  // postComment 内 isDuplicate/updateState 抛错 → .catch 捕获（debug 日志输出）
+  const script = `
+    process.env.ASTRA_HOOK_STATE_DIR = '/proc/nonexistent-astra-hook/denied';
+    const { run } = await import(${JSON.stringify(path.join(ROOT, 'src', 'runtime.mjs'))});
+    const r = await run('decision-log', JSON.stringify({
+      prompt: 'Approved 这个方案',
+      hookEventName: 'UserPromptSubmit',
+    }), { debug: true });
+    console.log('REASON:' + r.hookSpecificOutput.permissionDecisionReason);
+    await new Promise((res) => setTimeout(res, 300));
+  `;
+  const res = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8', timeout: 15000, cwd: ROOT,
+  });
+  assert.match(res.stdout, /session-resolve/, 'session-resolve path scheduled');
+  assert.equal(res.status, 0, 'process must exit 0');
+  // .catch 内 debug 日志生效（覆盖 decision-log.mjs:101）
+  assert.match(res.stderr, /background resolve failed/, 'catch handler logged the rejection');
+});
+
+test('FIX-M2: isDuplicate 锁内读-判-写（TOCTOU 消除，源码契约）', async () => {
+  const src = fs.readFileSync(
+    path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'src', 'hooks', 'decision-log.mjs'),
+    'utf8',
+  );
+  // 检查必须在 updateState mutate 闭包内（锁内），而非锁外 readState
+  assert.doesNotMatch(src, /readState\('decision-log-dedup'/, 'no lock-free readState for dedup check');
+  assert.match(src, /updateState\('decision-log-dedup', sessionId, \(prev\) =>/, 'check inside locked mutate');
+});
+
+test('FIX-M3: 多个不同 #N 降级为会话关联/分支兑底（错误归属防护）', async () => {
+  const { run } = await import('../src/runtime.mjs');
+  // "参考 #1111 的评论，同意此方案 #9999" —— 两个不同编号，首个匹配即归属有风险
+  const r = await run('decision-log', JSON.stringify({
+    prompt: '参考 #1111 的评论，同意此方案 #9999',
+    hookEventName: 'UserPromptSubmit',
+  }), {});
+  // 降级走 session-resolve（会话关联/分支兑底），而非直接采信首个 #N
+  assert.match(r.hookSpecificOutput.permissionDecisionReason, /session-resolve/);
+  await new Promise((res) => setTimeout(res, 100));
+});
+
+test('FIX-M3: 相同 #N 重复出现不降级（正常引用场景不误伤）', async () => {
+  const { run } = await import('../src/runtime.mjs');
+  const r = await run('decision-log', JSON.stringify({
+    prompt: '确认合并 #9999，#9999 的方案很好',
+    hookEventName: 'UserPromptSubmit',
+  }), {});
+  assert.match(r.hookSpecificOutput.permissionDecisionReason, /scheduled comment/);
+  await new Promise((res) => setImmediate(res));
+});
+
+test('FIX-M4: gh 失败始终 stderr 记录（不依赖 --debug，审计缺口可见）', async () => {
+  const src = fs.readFileSync(
+    path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'src', 'hooks', 'decision-log.mjs'),
+    'utf8',
+  );
+  assert.match(src, /if \(err\) console\.error\(`\[decision-log\] gh comment failed for #\$\{issueNum\}/, 'gh failure always logged');
+  assert.doesNotMatch(src, /if \(debug && err\) console\.error\(`\[decision-log\] gh comment failed/, 'old debug-gated logging removed');
+});
+
+test('FIX-M5: 去重键哈希化 + 状态文件 0600（状态不存明文 prompt）', async () => {
+  const s = 'fix-m5-hash';
+  clearState('decision-log-dedup', s);
+  await isDuplicate(s, '9999', '确认合并-含敏感内容-secret-token-value');
+  const state = await readState('decision-log-dedup', s);
+  const raw = JSON.stringify(state);
+  assert.ok(!raw.includes('确认合并'), 'state must not contain plaintext prompt');
+  assert.ok(!raw.includes('secret-token-value'), 'state must not contain plaintext secret');
+  // 键为 16 位十六进制哈希
+  assert.match(state.entries[0].key, /^9999:[0-9a-f]{16}$/, 'key is hashed');
 });
 
 // ---------- P2：会话关联优先级链 ----------

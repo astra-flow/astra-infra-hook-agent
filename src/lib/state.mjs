@@ -100,9 +100,9 @@ export async function updateState(name, sessionId, mutate) {
     const prev = await readState(name, sessionId);
     const next = mutate(prev);
     if (next === null) return prev;
-    // 原子写：tmp + rename
+    // 原子写：tmp + rename（Minor 5/L1：mode 0o600，多用户主机上状态不可被同机其他用户读取）
     const tmp = `${file}.tmp-${process.pid}`;
-    fs.writeFileSync(tmp, JSON.stringify(next), 'utf8');
+    fs.writeFileSync(tmp, JSON.stringify(next), { encoding: 'utf8', mode: 0o600 });
     fs.renameSync(tmp, file);
     return next;
   });

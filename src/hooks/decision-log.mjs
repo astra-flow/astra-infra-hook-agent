@@ -18,10 +18,11 @@
  *   - AC4 归属可信：分支兜底来源的评论显著标注"可能串 Issue"
  */
 import { execFile, execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
-import path from 'node:path';
 import { buildAllow } from '../lib/decision.mjs';
-import { readState, updateState } from '../lib/state.mjs';
+import { updateState } from '../lib/state.mjs';
+import { parseLinkLine, resolveLinkFile } from '../lib/session-link.mjs';
 
 /** 去重窗口（毫秒）：同 Issue + 同内容在此窗口内不重复发布 */
 export const DEDUP_WINDOW_MS = 120_000;
@@ -43,16 +44,14 @@ export function resolveFromSessionLink(sessionId, meta) {
   try {
     const linkFile = process.env.ASTRA_SESSION_LINK_FILE || meta.linkFile;
     if (!linkFile) return null;
-    const absPath = path.isAbsolute(linkFile)
-      ? linkFile
-      : path.join(process.env.ASTRA_WORKSPACE_ROOT || process.cwd(), linkFile);
+    // 路径解析复用共享契约库（#958 评审 Minor 6：消除重复实现）
+    const absPath = resolveLinkFile(linkFile);
     const raw = fs.readFileSync(absPath, 'utf8');
     const safeSession = String(sessionId || '').replace(/[\r\n\u0000-\u001F]/g, '_');
     const lines = raw.split('\n').filter((l) => l.includes(`session=${safeSession} | issue=#`));
     if (lines.length === 0) return null;
-    const last = lines[lines.length - 1];
-    const m = last.match(/issue=#(\d+)/);
-    return m ? m[1] : null;
+    // 行解析复用共享契约库（Minor 7：格式契约单一来源）
+    return parseLinkLine(lines[lines.length - 1]);
   } catch {
     return null;
   }
@@ -82,12 +81,11 @@ export default async function decisionLog(input, meta, { debug = false } = {}) {
 
   // 提取 Issue 编号（P2 优先级链）：prompt 显式 #N > 会话关联（session-issue-link）> 分支名兜底
   // 同步部分仅纯字符串正则；会话关联读文件与 git 分支名兜底移入后台（perf Medium 修复）
-  let issueNum = extractIssueNumberSync(prompt);
-  let resolvedBy = issueNum ? 'prompt' : null;
+  const issueNum = extractIssueNumberSync(prompt);
   if (!issueNum) {
     // 无编号 → 后台解析会话关联/分支名兜底；主流程先返回（避免同步 IO 阻塞）
     const sessionId = input.sessionId || '';
-    setImmediate(async () => {
+    setImmediate(() => {
       // P2：优先会话关联（多会话共享 worktree 下比分支名可信）
       let num = resolveFromSessionLink(sessionId, meta);
       let by = 'session-link';
@@ -95,7 +93,14 @@ export default async function decisionLog(input, meta, { debug = false } = {}) {
         num = extractFromBranch();
         by = 'branch';
       }
-      if (num) postComment(num, classification, prompt, meta, { debug, resolvedBy: by, source });
+      if (num) {
+        // Blocking 3（P-M1）：后台链路 rejection 兑底，维持 fail-open 契约
+        // （updateState IO 异常不再导致 unhandled rejection 进程非零退出）
+        postComment(num, classification, prompt, meta, { debug, resolvedBy: by, source, sessionId })
+          .catch((err) => {
+            if (debug) console.error(`[decision-log] background resolve failed: ${err.message}`);
+          });
+      }
     });
     return buildAllow('decision-log: scheduled session-resolve');
   }
@@ -103,7 +108,11 @@ export default async function decisionLog(input, meta, { debug = false } = {}) {
   // async 后台评论（CP-03）：setImmediate 让调用方先返回决策；
   // bin 入口用 process.exitCode=0（非 exit()），事件循环会等回调执行完（async 失效修复）
   setImmediate(() => {
-    postComment(issueNum, classification, prompt, meta, { debug, resolvedBy, source });
+    // Blocking 3（P-M1）：同上，后台链路 rejection 兑底
+    postComment(issueNum, classification, prompt, meta, { debug, resolvedBy: 'prompt', source, sessionId: input.sessionId || '' })
+      .catch((err) => {
+        if (debug) console.error(`[decision-log] background comment failed: ${err.message}`);
+      });
   });
 
   return buildAllow('decision-log: scheduled comment');
@@ -155,13 +164,27 @@ function describeNegative(p) {
   return '需要修改';
 }
 
-/** 提取 Issue 编号：仅纯字符串正则（同步，无 git） */
+/** 提取 Issue 编号：仅纯字符串正则（同步，无 git）。
+ * Minor 3（M3）：返回全部候选编号，多 #N 时由调用方降级处理，防错误归属。 */
+function extractIssueNumbersSync(prompt) {
+  const nums = [];
+  for (const m of prompt.matchAll(/#(\d+)/g)) nums.push(m[1]);
+  if (nums.length === 0) {
+    const m2 = prompt.match(/issue\s*(\d+)/i);
+    if (m2) nums.push(m2[1]);
+  }
+  return nums;
+}
+
+/** 提取 Issue 编号（兼容旧接口）：首个候选；多候选时返回 null（由调用方降级） */
 function extractIssueNumberSync(prompt) {
-  const m1 = prompt.match(/#(\d+)/);
-  if (m1) return m1[1];
-  const m2 = prompt.match(/issue\s*(\d+)/i);
-  if (m2) return m2[1];
-  return null;
+  const nums = extractIssueNumbersSync(prompt);
+  if (nums.length === 0) return null;
+  if (nums.length === 1) return nums[0];
+  // 多个不同编号：首个匹配即归属有错误风险（"参考 #953 的评论，同意此方案"）
+  // → 返回 null，走会话关联/分支兜底并在评论体标注（Minor 3）
+  const unique = new Set(nums);
+  return unique.size === 1 ? nums[0] : null;
 }
 
 /** 从分支名解析 Issue 编号（后台调用，带 timeout） */
@@ -175,7 +198,8 @@ function extractFromBranch() {
   }
 }
 
-/** prompt 脱敏（sec Medium）：截断 + 去链接/@ + 敏感键值隐藏，防 Markdown 注入 */
+/** prompt 脱敏（sec Medium）：截断 + 去链接/@ + 敏感键值隐藏 + 防 Markdown 注入。
+ * Blocking 2（Sec-H2）：压为单行 + 转义 Markdown 结构字符，防伪造归属标注行。 */
 function sanitizePrompt(prompt) {
   let s = String(prompt || '').trim();
   if (s.length > 500) s = `${s.slice(0, 500)}…(截断)`;
@@ -185,7 +209,17 @@ function sanitizePrompt(prompt) {
   s = s.replace(/https?:\/\/[^\s]+/g, '[link]');
   // 隐藏常见敏感模式（key/token 等）
   s = s.replace(/(key|token|password|secret|api[_-]?key)\s*[:=]\s*\S+/gi, '$1=***');
-  // 控制字符清理
+  // 隐藏无标签裸 token（Minor 1/M1：ghp_/github_pat_/sk-/Bearer/AKIA/xoxb 形态）
+  s = s.replace(/\b(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,})\b/g, '[token]');
+  s = s.replace(/\bBearer\s+[A-Za-z0-9._-]{20,}/gi, 'Bearer ***');
+  // Blocking 2（Sec-H2）：压为单行（换行转空格），prompt 内容不再跨行注入评论体
+  s = s.replace(/\s+/g, ' ');
+  // 转义 Markdown 结构字符：行首分隔线/列表/引用/代码围栏不再可伪造
+  s = s.replace(/^(-{3,}|\*{3,}|_{3,})$/, '—');
+  s = s.replace(/^\s*([-*+]|\d+\.)\s/, '· ');
+  s = s.replace(/^\s*>\s?/, '&gt; ');
+  s = s.replace(/`/g, "'");
+  // 控制字符清理（保留空格，已在上方归一）
   s = s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
   return s;
 }
@@ -210,12 +244,13 @@ export function classifySource(prompt) {
 /**
  * AC1 疑问句过滤：以？/? 结尾，或疑问语气词（吗/么/呢）后接问号。
  * 疑问句是澄清/确认请求，不是决策（"评审通过了么？"、"你确认正常吗？"）。
+ * Minor 8：语气词后限定扫描窗口（200 字符），避免长 prompt 贪婪回溯。
  */
 export function isInterrogative(prompt) {
   const s = String(prompt || '').trim();
   if (/[？?]\s*$/.test(s)) return true;
-  // 句中疑问语气词 + 后续问号（多句 prompt 中疑问子句主导语义）
-  if (/[吗么呢][^。！!]*[？?]/.test(s)) return true;
+  // 句中疑问语气词 + 有限窗口内问号（多句 prompt 中疑问子句主导语义）
+  if (/[吗么呢][^。！!？?]{0,200}[？?]/.test(s)) return true;
   return false;
 }
 
@@ -227,26 +262,45 @@ function normalizeForDedup(prompt) {
 /**
  * AC3 去重检查：同 Issue + 同内容（归一化）在 DEDUP_WINDOW_MS 内已发布 → true。
  * 状态存 <stateRoot>/decision-log-dedup/<sessionId>.json（复用 state.mjs 原子写）。
+ * Minor 2（M2）：检查移入 updateState mutate 闭包内（锁内读-判-写），消除 TOCTOU
+ * 与冗余读；键哈希化（Minor 5/L1），状态文件不存明文 prompt。
  */
 export async function isDuplicate(sessionId, issueNum, prompt, { now = Date.now() } = {}) {
-  const key = `${issueNum}:${normalizeForDedup(prompt)}`;
-  const prev = await readState('decision-log-dedup', sessionId);
-  const history = (prev && Array.isArray(prev.entries)) ? prev.entries : [];
-  if (history.some((e) => e.key === key && now - e.at < DEDUP_WINDOW_MS)) {
-    return true;
-  }
-  // 滑动清理：只保留窗口内的记录，防状态膨胀
-  const entries = history.filter((e) => now - e.at < DEDUP_WINDOW_MS);
-  entries.push({ key, at: now });
-  await updateState('decision-log-dedup', sessionId, () => ({ entries }));
-  return false;
+  const key = `${issueNum}:${dedupKeyHash(prompt)}`;
+  let duplicate = false;
+  await updateState('decision-log-dedup', sessionId, (prev) => {
+    const history = (prev && Array.isArray(prev.entries)) ? prev.entries : [];
+    if (history.some((e) => e.key === key && now - e.at < DEDUP_WINDOW_MS)) {
+      duplicate = true;
+      return prev; // 重复：不写入新记录，保持状态不变
+    }
+    // 滑动清理：只保留窗口内的记录，防状态膨胀
+    const entries = history.filter((e) => now - e.at < DEDUP_WINDOW_MS);
+    entries.push({ key, at: now });
+    return { entries };
+  });
+  return duplicate;
+}
+
+/** 去重键哈希（Minor 5/L1）：状态文件不存明文 prompt */
+function dedupKeyHash(prompt) {
+  return createHash('sha1').update(normalizeForDedup(prompt)).digest('hex').slice(0, 16);
 }
 
 /**
  * 评论到 Issue（gh CLI，失败静默；execFile 带 timeout）。
- * @param {string} resolvedBy - Issue 编号来源：'prompt' | 'branch'
+ * @param {string} resolvedBy - Issue 编号来源：'prompt' | 'session-link' | 'branch'
+ * @param {string} sessionId - 真实会话 ID（Blocking 1：去重按会话隔离，
+ *   多会话共享 worktree 下不再互相抑制合法审计记录）
  */
-async function postComment(issueNum, classification, prompt, meta, { debug = false, resolvedBy = 'prompt', source = 'user' } = {}) {
+async function postComment(issueNum, classification, prompt, meta, { debug = false, resolvedBy = 'prompt', source = 'user', sessionId = '' } = {}) {
+  // AC3 去重前置（perf Minor 6）：去重命中时省一次 git spawn
+  const sid = sessionId || 'default';
+  if (await isDuplicate(sid, issueNum, prompt)) {
+    if (debug) console.error('[decision-log] duplicate comment suppressed (dedup window)');
+    return;
+  }
+
   const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
   const branch = extractFromBranch() || '未知';
 
@@ -267,15 +321,9 @@ async function postComment(issueNum, classification, prompt, meta, { debug = fal
     `- Issue 归属来源：${resolvedBy === 'branch' ? '分支名兜底' : resolvedBy === 'session-link' ? '会话关联' : 'prompt 提取'}${attributionNote}\n` +
     `- 来源：UserPromptSubmit hook 自动记录（astra-hook decision-log）`;
 
-  // AC3 去重：窗口内同 Issue + 同内容不重复发布（#881 x4 / #900 x10 事故）
-  const sessionId = meta.sessionId || 'default';
-  if (await isDuplicate(sessionId, issueNum, prompt)) {
-    if (debug) console.error('[decision-log] duplicate comment suppressed (dedup window)');
-    return;
-  }
-
   const child = execFile('gh', ['issue', 'comment', issueNum, '--body', body], { timeout: 10000 }, (err) => {
-    if (debug && err) console.error(`[decision-log] gh comment failed: ${err.message}`);
+    // Minor 4（M4）：审计失败始终 stderr 记录（不依赖 --debug），审计缺口可见
+    if (err) console.error(`[decision-log] gh comment failed for #${issueNum}: ${err.message}`);
   });
   // 避免超时后子进程残留
   if (child) child.on('error', () => { /* fail-open */ });
