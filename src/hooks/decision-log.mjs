@@ -272,7 +272,8 @@ export async function isDuplicate(sessionId, issueNum, prompt, { now = Date.now(
     const history = (prev && Array.isArray(prev.entries)) ? prev.entries : [];
     if (history.some((e) => e.key === key && now - e.at < DEDUP_WINDOW_MS)) {
       duplicate = true;
-      return prev; // 重复：不写入新记录，保持状态不变
+      // 返回 null：updateState 跳过写盘（复评 Minor：消除重复命中时的冗余原子写）
+      return null;
     }
     // 滑动清理：只保留窗口内的记录，防状态膨胀
     const entries = history.filter((e) => now - e.at < DEDUP_WINDOW_MS);
