@@ -318,24 +318,35 @@ test('FIX-B3: E2E —— 状态目录不可写时进程仍正常退出（fail-op
 
 test('FIX-B3: E2E —— session-resolve 后台链路 rejection 被 .catch 捕获（debug 日志覆盖）', async () => {
   // 构造：无 prompt 编号 → session-resolve 后台链路；状态目录不可写使
-  // postComment 内 isDuplicate/updateState 抛错 → .catch 捕获（debug 日志输出）
-  const script = `
-    process.env.ASTRA_HOOK_STATE_DIR = '/proc/nonexistent-astra-hook/denied';
-    const { run } = await import(${JSON.stringify(path.join(ROOT, 'src', 'runtime.mjs'))});
-    const r = await run('decision-log', JSON.stringify({
-      prompt: 'Approved 这个方案',
-      hookEventName: 'UserPromptSubmit',
-    }), { debug: true });
-    console.log('REASON:' + r.hookSpecificOutput.permissionDecisionReason);
-    await new Promise((res) => setTimeout(res, 300));
-  `;
-  const res = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
-    encoding: 'utf8', timeout: 15000, cwd: ROOT,
-  });
-  assert.match(res.stdout, /session-resolve/, 'session-resolve path scheduled');
-  assert.equal(res.status, 0, 'process must exit 0');
-  // .catch 内 debug 日志生效（覆盖 decision-log.mjs:101）
-  assert.match(res.stderr, /background resolve failed/, 'catch handler logged the rejection');
+  // postComment 内 isDuplicate/updateState 抛错 → .catch 捕获（debug 日志输出）。
+  // 注意：postComment 仅在解析出 Issue 编号后调用——测试进程 cwd 的分支名
+  // 必须以数字结尾（extractFromBranch 兜底 /(\d+)$/），否则后台链路在
+  // postComment 前即结束，catch 无从触发（合并到 main 后分支名无尾号导致
+  // 该用例失败，此处显式建带尾号分支）。
+  const tmpBranch = `tmp-958-catch-958`;
+  spawnSync('git', ['checkout', '-b', tmpBranch], { encoding: 'utf8', cwd: ROOT, timeout: 5000 });
+  try {
+    const script = `
+      process.env.ASTRA_HOOK_STATE_DIR = '/proc/nonexistent-astra-hook/denied';
+      const { run } = await import(${JSON.stringify(path.join(ROOT, 'src', 'runtime.mjs'))});
+      const r = await run('decision-log', JSON.stringify({
+        prompt: 'Approved 这个方案',
+        hookEventName: 'UserPromptSubmit',
+      }), { debug: true });
+      console.log('REASON:' + r.hookSpecificOutput.permissionDecisionReason);
+      await new Promise((res) => setTimeout(res, 1500));
+    `;
+    const res = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+      encoding: 'utf8', timeout: 15000, cwd: ROOT,
+    });
+    assert.match(res.stdout, /session-resolve/, 'session-resolve path scheduled');
+    assert.equal(res.status, 0, 'process must exit 0');
+    // .catch 内 debug 日志生效（覆盖 decision-log.mjs:101）
+    assert.match(res.stderr, /background resolve failed/, 'catch handler logged the rejection');
+  } finally {
+    spawnSync('git', ['checkout', 'main'], { encoding: 'utf8', cwd: ROOT, timeout: 5000 });
+    spawnSync('git', ['branch', '-D', tmpBranch], { encoding: 'utf8', cwd: ROOT, timeout: 5000 });
+  }
 });
 
 test('FIX-M2: isDuplicate 锁内读-判-写（TOCTOU 消除，源码契约）', async () => {
