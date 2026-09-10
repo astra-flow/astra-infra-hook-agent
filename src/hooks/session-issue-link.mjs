@@ -13,6 +13,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { buildAllow } from '../lib/decision.mjs';
 import { isSafePath } from '../lib/validate.mjs';
+import { formatLinkLine, resolveLinkFile } from '../lib/session-link.mjs';
 
 /**
  * @param {object} input - 归一化输入（camelCase）
@@ -50,7 +51,8 @@ export default async function sessionIssueLink(input, meta, { debug = false } = 
   const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
   // sessionId 行注入防护（sec 复审 Low）：替换换行/控制字符，避免污染审计文件
   const safeSession = String(sessionId || 'unknown').replace(/[\r\n\u0000-\u001F]/g, '_');
-  const line = `- ${timestamp} | ${eventType} | session=${safeSession} | issue=#${issueNum}\n`;
+  // 行格式契约统一由 lib/session-link.mjs 提供（#958 评审 Minor 7：消除双处硬编码）
+  const line = formatLinkLine(timestamp, eventType, safeSession, issueNum);
 
   try {
     const absPath = resolveLinkFile(linkFile);
@@ -84,12 +86,4 @@ function extractFromResponse(response) {
   const m2 = s.match(/#(\d+)/);
   if (m2) return m2[1];
   return '';
-}
-
-/** 解析写入路径：支持相对工作区路径或绝对路径 */
-function resolveLinkFile(linkFile) {
-  if (path.isAbsolute(linkFile)) return linkFile;
-  // 相对路径：以工作区根为基准（env ASTRA_WORKSPACE_ROOT 注入，避免硬编码）
-  const root = process.env.ASTRA_WORKSPACE_ROOT || process.cwd();
-  return path.join(root, linkFile);
 }

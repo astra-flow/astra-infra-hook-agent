@@ -51,7 +51,7 @@ test('FIN: decision-log — extractFromBranch catch (103-104) via gitless PATH s
     process.env.PATH = ${JSON.stringify(gitlessBin)};
     process.env.ASTRA_HOOK_STATE_DIR = ${JSON.stringify(TEST_STATE)};
     const { run } = await import(${JSON.stringify(path.join(ROOT, 'src', 'runtime.mjs'))});
-    // 无 #N/issue N → branch-resolve 路径 → 后台 extractFromBranch → git ENOENT → catch → null
+    // 无 #N/issue N → session-resolve 路径 → 后台会话关联（无记录）→ extractFromBranch → git ENOENT → catch → null
     const r = await run('decision-log', JSON.stringify({ prompt: 'Approved 这个方案', hookEventName: 'UserPromptSubmit' }), {});
     console.log('REASON:' + r.hookSpecificOutput.permissionDecisionReason);
     await new Promise((res) => setTimeout(res, 300));
@@ -59,7 +59,7 @@ test('FIN: decision-log — extractFromBranch catch (103-104) via gitless PATH s
   const res = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
     encoding: 'utf8', timeout: 15000, cwd: ROOT,
   });
-  assert.match(res.stdout, /branch-resolve/, 'no issue number in prompt → branch-resolve scheduled');
+  assert.match(res.stdout, /session-resolve/, 'no issue number in prompt → session-resolve scheduled');
   // 后台 extractFromBranch catch 执行（git ENOENT），进程仍 exit 0
   assert.equal(res.status, 0);
 });

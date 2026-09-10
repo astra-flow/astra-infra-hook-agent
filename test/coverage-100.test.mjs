@@ -323,12 +323,12 @@ test('COV: decision-log — branch-resolve path + negative keyword + empty promp
   const r0 = await run('decision-log', JSON.stringify({ hookEventName: 'UserPromptSubmit' }), {});
   assert.match(r0.hookSpecificOutput.permissionDecisionReason, /no prompt/);
 
-  // 反向关键词 + 无 Issue 编号 → scheduled branch-resolve 分支（后台 git 解析）
+  // 反向关键词 + 无 Issue 编号 → scheduled session-resolve 分支（P2：后台先试会话关联，再试分支名）
   const r1 = await run('decision-log', JSON.stringify({
     prompt: '这个方案需要修改，暂缓',
     hookEventName: 'UserPromptSubmit',
   }), {});
-  assert.match(r1.hookSpecificOutput.permissionDecisionReason, /branch-resolve/);
+  assert.match(r1.hookSpecificOutput.permissionDecisionReason, /session-resolve/);
   await new Promise((res) => setImmediate(res));
 
   // issue N 格式（非 #N）→ extractIssueNumberSync 第二正则

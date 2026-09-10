@@ -137,7 +137,7 @@ test('BR2: decision-log — describeNegative fallback (83) + branch no-digit (10
     process.chdir(${JSON.stringify(bareRepo)});
     process.env.ASTRA_HOOK_STATE_DIR = ${JSON.stringify(TEST_STATE)};
     const { run } = await import(${JSON.stringify(path.join(ROOT, 'src', 'runtime.mjs'))});
-    // 无 #N → branch-resolve → 后台 extractFromBranch → 分支无数字 → null → 不评论
+    // 无 #N → session-resolve → 后台会话关联（无记录）→ 分支名解析 → 无数字 → null → 不评论
     const r = await run('decision-log', JSON.stringify({ prompt: 'Approved 这个方案', hookEventName: 'UserPromptSubmit' }), {});
     console.log('REASON:' + r.hookSpecificOutput.permissionDecisionReason);
     await new Promise((res) => setTimeout(res, 300));
@@ -145,7 +145,7 @@ test('BR2: decision-log — describeNegative fallback (83) + branch no-digit (10
   const res = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
     encoding: 'utf8', timeout: 15000, cwd: ROOT,
   });
-  assert.match(res.stdout, /branch-resolve/);
+  assert.match(res.stdout, /session-resolve/);
   assert.equal(res.status, 0);
 });
 
