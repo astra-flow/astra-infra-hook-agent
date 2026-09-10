@@ -34,15 +34,19 @@ export default async function deliveryBranchGuard(input, meta, { debug = false }
     return buildAllow(`delivery-branch-guard: phase "${phase || 'none'}" not implement`);
   }
 
-  // 当前分支检测（git 不可用 → fail-open）
+  // 当前分支检测（git 不可用 → fail-open；测试可注入 ASTRA_GIT_BRANCH 覆盖）
   let branch = '';
-  try {
-    branch = execFileSync('git', ['branch', '--show-current'], {
-      encoding: 'utf8', timeout: 3000, cwd: process.env.ASTRA_WORKSPACE_ROOT || process.cwd(),
-    }).trim();
-  } catch (err) {
-    if (debug) console.error(`[delivery-branch-guard] git failed: ${err.message}`);
-    return buildAllow('delivery-branch-guard: git unavailable (fail-open)');
+  if (process.env.ASTRA_GIT_BRANCH) {
+    branch = process.env.ASTRA_GIT_BRANCH;
+  } else {
+    try {
+      branch = execFileSync('git', ['branch', '--show-current'], {
+        encoding: 'utf8', timeout: 3000, cwd: process.env.ASTRA_WORKSPACE_ROOT || process.cwd(),
+      }).trim();
+    } catch (err) {
+      if (debug) console.error(`[delivery-branch-guard] git failed: ${err.message}`);
+      return buildAllow('delivery-branch-guard: git unavailable (fail-open)');
+    }
   }
 
   const prefixes = meta.allowedBranchPrefixes || ['feature/', 'hotfix/'];

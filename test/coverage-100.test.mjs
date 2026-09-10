@@ -421,25 +421,4 @@ test('COV: session-issue-link — write failure fail-open (debug path)', async (
   assert.match(r.hookSpecificOutput.permissionDecisionReason, /write failed/);
 });
 
-// ---------- delivery-gate.mjs：76-78（exists 分支已覆盖，补 unknown phase/debug） ----------
-test('COV: delivery-gate — unknown phase + artifact present + debug', async () => {
-  const { run } = await import('../src/runtime.mjs');
-  const wsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'astra-ws-'));
-  process.env.ASTRA_WORKSPACE_ROOT = wsRoot;
-  try {
-    // unknown phase
-    let res = callBin('delivery-gate', JSON.stringify({ sessionId: 'x', hookEventName: 'PreToolUse', toolName: 'create_file' }), { ASTRA_SDLC_PHASE: 'unknown-phase' });
-    let out = JSON.parse(res.stdout);
-    assert.match(out.hookSpecificOutput.permissionDecisionReason, /unknown phase/);
-
-    // design + spec.md 存在 → allow（76-78 exists=true 分支）
-    const specDir = path.join(wsRoot, 'docs/03-agile/artifacts/specs');
-    fs.mkdirSync(specDir, { recursive: true });
-    fs.writeFileSync(path.join(specDir, 'spec-001-test.md'), 'x', 'utf8');
-    res = callBin('delivery-gate', JSON.stringify({ sessionId: 'x', hookEventName: 'PreToolUse', toolName: 'create_file' }), { ASTRA_SDLC_PHASE: 'design' });
-    out = JSON.parse(res.stdout);
-    assert.match(out.hookSpecificOutput.permissionDecisionReason, /present/);
-  } finally {
-    delete process.env.ASTRA_WORKSPACE_ROOT;
-  }
-});
+// ---------- delivery hooks（#976）：delivery-gate 已删除，覆盖率由 delivery-hooks.test.mjs 承载 ----------

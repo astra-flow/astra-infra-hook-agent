@@ -149,21 +149,7 @@ test('BR2: decision-log — describeNegative fallback (83) + branch no-digit (10
   assert.equal(res.status, 0);
 });
 
-test('BR2: delivery-gate — cwd fallback (65) + eventName default in deny path (92)', async () => {
-  const deliveryGate = (await import('../src/hooks/delivery-gate.mjs')).default;
-  // 65: ASTRA_WORKSPACE_ROOT 缺省 → process.cwd() 分支（cwd=ROOT，specs 不存在 → deny）
-  delete process.env.ASTRA_WORKSPACE_ROOT;
-  process.env.ASTRA_SDLC_PHASE = 'design';
-  try {
-    const r1 = await deliveryGate({ toolName: 'create_file', hookEventName: 'PreToolUse' }, {}, {});
-    assert.match(r1.hookSpecificOutput.permissionDecisionReason, /交付门禁/);
-    // 92: deny 路径 eventName 兜底（hookEventName 缺省）
-    const r2 = await deliveryGate({ toolName: 'create_file' }, {}, {});
-    assert.equal(r2.hookSpecificOutput.hookEventName, 'PreToolUse');
-  } finally {
-    delete process.env.ASTRA_SDLC_PHASE;
-  }
-});
+// delivery-gate 已删除（#976），其分支覆盖由 delivery-hooks.test.mjs 承载
 
 test('BR2: runtime — debug runtime error message fallback (106)', async () => {
   // 106: err?.message || err —— message 缺省分支（Error 无 message → err 本身）
