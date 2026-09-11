@@ -58,15 +58,62 @@ export const HOOK_METADATA = {
     // 写入路径经配置注入（非硬编码，D8 路径防护）
     linkFile: process.env.ASTRA_SESSION_LINK_FILE || 'memories/session/issue-link.md',
   },
-  'delivery-gate': {
-    name: 'delivery-gate',
-    description: '交付门禁：SDLC artifact 存在性检查（spec.md/task-breakdown，#915）',
+  // ---- 交付流门禁 hooks（#976 机制强制层，2 硬 3 软）----
+  // 阶段声明契约：Agent 执行交付阶段动作时设置 env ASTRA_SDLC_PHASE
+  // （specify|plan|implement|test|converge），未声明 → 放行（fail-open）。
+  // artifact 路径：specs/<NNN-feature>/（交付模型 v1.0，speckit 引擎约定）。
+  'delivery-branch-guard': {
+    name: 'delivery-branch-guard',
+    description: '交付门禁（阻断）：implement 阶段写代码前校验当前分支为 feature/hotfix（#976）',
     events: ['PreToolUse'],
     timeoutMs: 5000,
     platforms: ['vscode', 'claude-code'],
-    // 阶段声明契约：Agent 执行 /design 或 /implement 时设置 ASTRA_SDLC_PHASE
-    // 未声明 → 放行（fail-open，不误伤常规编码）
     phaseEnv: 'ASTRA_SDLC_PHASE',
+    // 阻断级别：deny（分支纪律是红线，main/staging/production 直接改代码不可回退）
+    level: 'deny',
+    allowedBranchPrefixes: ['feature/', 'hotfix/'],
+  },
+  'delivery-test-gate': {
+    name: 'delivery-test-gate',
+    description: '交付门禁（阻断）：converge 阶段前校验测试套件通过记录存在（#976）',
+    events: ['PreToolUse'],
+    timeoutMs: 5000,
+    platforms: ['vscode', 'claude-code'],
+    phaseEnv: 'ASTRA_SDLC_PHASE',
+    // 阻断级别：deny（测试未过就推进 = 质量红线）
+    level: 'deny',
+    // 测试通过记录：test.md 含执行记录节，或 CI 结论文件
+    testEvidence: 'specs/',
+  },
+  'delivery-constitution-check': {
+    name: 'delivery-constitution-check',
+    description: '交付门禁（警告）：plan 产出后校验 plan.md 含 Constitution Check 节（#976）',
+    events: ['PostToolUse'],
+    timeoutMs: 5000,
+    platforms: ['vscode', 'claude-code'],
+    phaseEnv: 'ASTRA_SDLC_PHASE',
+    // 警告级别：文档规范问题可补，不拦死
+    level: 'warn',
+  },
+  'delivery-workitem-link': {
+    name: 'delivery-workitem-link',
+    description: '交付门禁（警告）：specify 产出后校验 spec.md 头部含 work-item ID（#976）',
+    events: ['PostToolUse'],
+    timeoutMs: 5000,
+    platforms: ['vscode', 'claude-code'],
+    phaseEnv: 'ASTRA_SDLC_PHASE',
+    // 警告级别：追溯锚点事后可补
+    level: 'warn',
+  },
+  'delivery-stage-label': {
+    name: 'delivery-stage-label',
+    description: '交付门禁（警告）：阶段推进时校验 stage:X 标签与实际阶段一致（#976）',
+    events: ['PostToolUse'],
+    timeoutMs: 5000,
+    platforms: ['vscode', 'claude-code'],
+    phaseEnv: 'ASTRA_SDLC_PHASE',
+    // 警告级别：标签是状态提示，不影响实际交付
+    level: 'warn',
   },
 };
 

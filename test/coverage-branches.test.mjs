@@ -147,35 +147,7 @@ test('BR: decision-log — meta pattern defaults (61-62) + describe branches (80
   await new Promise((res) => setTimeout(res, 300));
 });
 
-test('BR: delivery-gate — debug check-failed (65) + hookEventName default (76/81/92)', async () => {
-  const deliveryGate = (await import('../src/hooks/delivery-gate.mjs')).default;
-  // 92: hookEventName 缺省 → 'PreToolUse' 兜底（非写工具分支）
-  const r1 = await deliveryGate({ toolName: 'read_file' }, {}, {});
-  assert.equal(r1.hookSpecificOutput.hookEventName, '');
-  // 76/81: artifact present + hookEventName 缺省
-  const wsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'astra-wsbr-'));
-  process.env.ASTRA_WORKSPACE_ROOT = wsRoot;
-  process.env.ASTRA_SDLC_PHASE = 'design';
-  try {
-    const specDir = path.join(wsRoot, 'docs/03-agile/artifacts/specs');
-    fs.mkdirSync(specDir, { recursive: true });
-    fs.writeFileSync(path.join(specDir, 'spec-001.md'), 'x', 'utf8');
-    const r2 = await deliveryGate({ toolName: 'create_file' }, {}, {});
-    assert.equal(r2.hookSpecificOutput.hookEventName, 'PreToolUse', 'default eventName applied');
-    assert.match(r2.hookSpecificOutput.permissionDecisionReason, /present/);
-    // 65: debug check-failed —— artifactDir 为文件 → existsSync true → readdirSync 抛 ENOTDIR → debug 日志
-    const wsRoot2 = fs.mkdtempSync(path.join(os.tmpdir(), 'astra-wsbr2-'));
-    const specFile = path.join(wsRoot2, 'docs/03-agile/artifacts/specs');
-    fs.mkdirSync(path.dirname(specFile), { recursive: true });
-    fs.writeFileSync(specFile, 'file-not-dir', 'utf8');
-    process.env.ASTRA_WORKSPACE_ROOT = wsRoot2;
-    const r3 = await deliveryGate({ toolName: 'create_file' }, {}, { debug: true });
-    assert.match(r3.hookSpecificOutput.permissionDecisionReason, /fail-open/);
-  } finally {
-    delete process.env.ASTRA_WORKSPACE_ROOT;
-    delete process.env.ASTRA_SDLC_PHASE;
-  }
-});
+// delivery-gate 已删除（#976），其分支覆盖由 delivery-hooks.test.mjs 承载
 
 test('BR: loop-guard — bands default fallback (60-61) + eventName defaults (75/89/106/114) + summary long-string/empty-nested (151/155)', async () => {
   const loopGuard = (await import('../src/hooks/loop-guard.mjs')).default;
