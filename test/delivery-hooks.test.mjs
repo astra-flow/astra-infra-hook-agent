@@ -219,3 +219,128 @@ test('CLEANUP: remove phase env', async () => {
   delete process.env.ASTRA_SDLC_PHASE;
   assert.ok(true);
 });
+
+// ---- 覆盖率补齐（#957 规范：新增代码 100%）----
+
+test('COV: branch-guard — git unavailable fail-open path (42-50)', async () => {
+  process.env.ASTRA_SDLC_PHASE = 'implement';
+  // ASTRA_GIT_BRANCH 未设置 + git 在非 repo 目录失败 → catch → fail-open allow
+  delete process.env.ASTRA_GIT_BRANCH;
+  const r = await run('delivery-branch-guard', writeTool(), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+  assert.match(r.hookSpecificOutput.permissionDecisionReason, /fail-open|ok/);
+});
+
+test('COV: constitution-check — specs dir readdir fail-open (22-23/29-30/33-34) + unknown phase (61-63)', async () => {
+  // unknown phase → allow（61-63）
+  process.env.ASTRA_SDLC_PHASE = 'unknown-phase';
+  let r = await run('delivery-constitution-check', postTool(), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+  // specs/ 为文件 → readdirSync 抛 ENOTDIR → catch → fail-open（29-30/33-34）
+  const badRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'astra-cc-bad-'));
+  fs.writeFileSync(path.join(badRoot, 'specs'), 'file-not-dir', 'utf8');
+  process.env.ASTRA_SDLC_PHASE = 'plan';
+  process.env.ASTRA_WORKSPACE_ROOT = badRoot;
+  r = await run('delivery-constitution-check', postTool(), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+  process.env.ASTRA_WORKSPACE_ROOT = TEST_ROOT;
+});
+
+test('COV: test-gate — specs 为文件 fail-open (36-37/43-44) + 无 feature 目录 (65-66) + 空目录 (79-81)', async () => {
+  // specs/ 为文件 → readdirSync 抛错 → fail-open
+  const badRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'astra-tg-bad-'));
+  fs.writeFileSync(path.join(badRoot, 'specs'), 'file-not-dir', 'utf8');
+  process.env.ASTRA_SDLC_PHASE = 'converge';
+  process.env.ASTRA_WORKSPACE_ROOT = badRoot;
+  let r = await run('delivery-test-gate', writeTool(), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+  // specs/ 存在但无 feature 目录 → deny reason "无 feature 目录"（65-66）
+  const emptyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'astra-tg-empty-'));
+  fs.mkdirSync(path.join(emptyRoot, 'specs'), { recursive: true });
+  process.env.ASTRA_WORKSPACE_ROOT = emptyRoot;
+  r = await run('delivery-test-gate', writeTool(), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(r.hookSpecificOutput.permissionDecisionReason, /feature 目录/);
+  process.env.ASTRA_WORKSPACE_ROOT = TEST_ROOT;
+});
+
+test('COV: workitem-link — specs 异常 fail-open (26-27/33-34/37-38) + plan/spec 缺失跳过 (58-59/66-68)', async () => {
+  // specs/ 为文件 → fail-open
+  const badRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'astra-wl-bad-'));
+  fs.writeFileSync(path.join(badRoot, 'specs'), 'file-not-dir', 'utf8');
+  process.env.ASTRA_SDLC_PHASE = 'specify';
+  process.env.ASTRA_WORKSPACE_ROOT = badRoot;
+  let r = await run('delivery-workitem-link', postTool(), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+  // specs/ 空目录 → 跳过（33-34/37-38）
+  const emptyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'astra-wl-empty-'));
+  fs.mkdirSync(path.join(emptyRoot, 'specs'), { recursive: true });
+  process.env.ASTRA_WORKSPACE_ROOT = emptyRoot;
+  r = await run('delivery-workitem-link', postTool(), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+  // feature 目录存在但 spec.md 未产出 → 跳过（58-59/66-68）
+  const noSpecRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'astra-wl-nospec-'));
+  fs.mkdirSync(path.join(noSpecRoot, 'specs/002-x'), { recursive: true });
+  process.env.ASTRA_WORKSPACE_ROOT = noSpecRoot;
+  r = await run('delivery-workitem-link', postTool(), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+  process.env.ASTRA_WORKSPACE_ROOT = TEST_ROOT;
+});
+
+test('COV: stage-label — no phase (33-34) + unknown phase (44-45)', async () => {
+  // 无 phase → allow（33-34）
+  delete process.env.ASTRA_SDLC_PHASE;
+  process.env.ASTRA_STAGE_LABEL = 'stage:feature';
+  let r = await run('delivery-stage-label', postTool(), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+  // unknown phase → allow（44-45）
+  process.env.ASTRA_SDLC_PHASE = 'unknown-phase';
+  r = await run('delivery-stage-label', postTool(), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+  delete process.env.ASTRA_STAGE_LABEL;
+});
+
+test('COV2: constitution/test-gate/workitem-link — specs/ 不存在分支', async () => {
+  const noSpecsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'astra-cov2-'));
+  process.env.ASTRA_WORKSPACE_ROOT = noSpecsRoot;
+  // constitution-check：specs/ 不存在 → 跳过（22-23）
+  process.env.ASTRA_SDLC_PHASE = 'plan';
+  let r = await run('delivery-constitution-check', postTool(), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+  // test-gate：specs/ 不存在 → deny "specs/ 目录不存在"（36-37）
+  process.env.ASTRA_SDLC_PHASE = 'converge';
+  r = await run('delivery-test-gate', writeTool(), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(r.hookSpecificOutput.permissionDecisionReason, /specs\/ 目录不存在/);
+  // workitem-link：specs/ 不存在 → 跳过（26-27）
+  process.env.ASTRA_SDLC_PHASE = 'specify';
+  r = await run('delivery-workitem-link', postTool(), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+  process.env.ASTRA_WORKSPACE_ROOT = TEST_ROOT;
+});
+
+test('COV3: 空 specs 目录 + plan.md 未产出 + 非 specify 阶段分支', async () => {
+  // constitution-check：specs/ 空目录 → "无 feature 目录"（29-30）
+  const emptyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'astra-cov3-'));
+  fs.mkdirSync(path.join(emptyRoot, 'specs'), { recursive: true });
+  process.env.ASTRA_WORKSPACE_ROOT = emptyRoot;
+  process.env.ASTRA_SDLC_PHASE = 'plan';
+  let r = await run('delivery-constitution-check', postTool(), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+  // constitution-check：feature 目录存在但 plan.md 未产出（33-34）
+  fs.mkdirSync(path.join(emptyRoot, 'specs/003-y'), { recursive: true });
+  r = await run('delivery-constitution-check', postTool(), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+  // test-gate：非 converge 阶段（65-66 = WRITE_TOOLS 早退已在其他用例覆盖；此处为 converge 下 dirs[0] 无 test.md 的 deny 已覆盖）
+  // workitem-link：非 specify 阶段（58-59）
+  process.env.ASTRA_SDLC_PHASE = 'plan';
+  r = await run('delivery-workitem-link', postTool(), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+  process.env.ASTRA_WORKSPACE_ROOT = TEST_ROOT;
+});
+
+test('COV4: test-gate — 读工具早退（65-66）', async () => {
+  process.env.ASTRA_SDLC_PHASE = 'converge';
+  const r = await run('delivery-test-gate', writeTool('read_file'), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+});
