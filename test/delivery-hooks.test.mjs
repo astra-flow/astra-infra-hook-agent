@@ -87,6 +87,22 @@ test('BRANCH: implement phase + hotfix branch → allow', async () => {
   delete process.env.ASTRA_GIT_BRANCH;
 });
 
+test('BRANCH: implement phase + fix branch → allow (#1004 bugfix scenario)', async () => {
+  process.env.ASTRA_SDLC_PHASE = 'implement';
+  process.env.ASTRA_GIT_BRANCH = 'fix/null-pointer-1004';
+  const r = await run('delivery-branch-guard', writeTool(), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+  delete process.env.ASTRA_GIT_BRANCH;
+});
+
+test('BRANCH: implement phase + refactor branch → allow (#1004 refactor scenario)', async () => {
+  process.env.ASTRA_SDLC_PHASE = 'implement';
+  process.env.ASTRA_GIT_BRANCH = 'refactor/extract-service-1004';
+  const r = await run('delivery-branch-guard', writeTool(), {});
+  assert.equal(r.hookSpecificOutput.permissionDecision, 'allow');
+  delete process.env.ASTRA_GIT_BRANCH;
+});
+
 test('BRANCH: no phase declared → allow (fail-open)', async () => {
   delete process.env.ASTRA_SDLC_PHASE;
   const r = await run('delivery-branch-guard', writeTool(), {});

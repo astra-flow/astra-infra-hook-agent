@@ -64,14 +64,15 @@ export const HOOK_METADATA = {
   // artifact 路径：specs/<NNN-feature>/（交付模型 v1.0，speckit 引擎约定）。
   'delivery-branch-guard': {
     name: 'delivery-branch-guard',
-    description: '交付门禁（阻断）：implement 阶段写代码前校验当前分支为 feature/hotfix（#976）',
+    description: '交付门禁（阻断）：implement 阶段写代码前校验当前分支为 feature/hotfix/fix/refactor（#976，#1004 增 fix/refactor）',
     events: ['PreToolUse'],
     timeoutMs: 5000,
     platforms: ['vscode', 'claude-code'],
     phaseEnv: 'ASTRA_SDLC_PHASE',
     // 阻断级别：deny（分支纪律是红线，main/staging/production 直接改代码不可回退）
     level: 'deny',
-    allowedBranchPrefixes: ['feature/', 'hotfix/'],
+    // 前缀与 stage-gates.md 类型路由表对齐（#1004：补 fix/ refactor/，消除跨制品漂移）
+    allowedBranchPrefixes: ['feature/', 'hotfix/', 'fix/', 'refactor/'],
   },
   'delivery-test-gate': {
     name: 'delivery-test-gate',
