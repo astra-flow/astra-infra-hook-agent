@@ -14,6 +14,7 @@ import { normalizeInput } from './lib/normalize.mjs';
 import { validateInput, isExemptTool } from './lib/validate.mjs';
 import { buildDecision, FAIL_OPEN_DECISION } from './lib/decision.mjs';
 import { loadHookMetadata } from './lib/config.mjs';
+import { writeAudit, extractSessionId } from './lib/audit.mjs';
 
 /** 敏感键匹配（debug 日志脱敏用） */
 const SENSITIVE_KEY_RE = /(key|token|password|secret|credential|api[_-]?key|authorization)/i;
@@ -38,6 +39,27 @@ function summarizeInput(input) {
 }
 
 /**
+ * 决策统一出口审计（#993）：所有决策路径经此旁路写入审计记录。
+ * fail-open 优先：writeAudit 内部全包 try/catch，任何异常静默吞掉，
+ * 绝不影响决策返回值。审计路径预算 < 5ms（appendFileSync 微秒级）。
+ *
+ * @param {object} decision 决策 JSON
+ * @param {{hookName: string, toolName?: string, stdin?: string, startedAt?: number}} ctx
+ */
+function auditDecision(decision, ctx) {
+  try {
+    writeAudit(decision, {
+      hookName: ctx.hookName,
+      toolName: ctx.toolName ?? null,
+      sessionId: extractSessionId(ctx.stdin ?? ''),
+      durationMs: ctx.startedAt ? Date.now() - ctx.startedAt : null,
+    });
+  } catch {
+    // 双保险：writeAudit 已兜底，此处防御未来重构引入的同步抛出
+  }
+}
+
+/**
  * 执行指定 hook。
  * @param {string} hookName - hook 名（loop-guard / decision-log / session-issue-link）
  * @param {string} stdin - 来自 VS Code/Claude Code 的原始 stdin JSON 字符串
@@ -46,6 +68,7 @@ function summarizeInput(input) {
  */
 export async function run(hookName, stdin, opts = {}) {
   const { debug = false } = opts;
+  const startedAt = Date.now();
 
   try {
     // 1. 解析 stdin JSON
@@ -55,7 +78,9 @@ export async function run(hookName, stdin, opts = {}) {
     } catch {
       // stdin 非 JSON → fail-open
       if (debug) console.error('[astra-hook] invalid stdin JSON, fail-open');
-      return FAIL_OPEN_DECISION;
+      const d = FAIL_OPEN_DECISION;
+      auditDecision(d, { hookName, stdin, startedAt });
+      return d;
     }
 
     // 2. 平台字段归一化（snake_case → camelCase）
@@ -66,21 +91,27 @@ export async function run(hookName, stdin, opts = {}) {
     const validation = validateInput(input);
     if (!validation.valid) {
       if (debug) console.error(`[astra-hook] validation failed: ${validation.reason}, fail-open`);
-      return FAIL_OPEN_DECISION;
+      const d = FAIL_OPEN_DECISION;
+      auditDecision(d, { hookName, toolName: input.toolName, stdin, startedAt });
+      return d;
     }
 
     // 4. 加载 hook 元数据
     const meta = loadHookMetadata(hookName);
     if (!meta) {
       if (debug) console.error(`[astra-hook] unknown hook "${hookName}", fail-open`);
-      return FAIL_OPEN_DECISION;
+      const d = FAIL_OPEN_DECISION;
+      auditDecision(d, { hookName, toolName: input.toolName, stdin, startedAt });
+      return d;
     }
 
     // 5. 预过滤：事件类型不匹配 → 直接 continue（性能：避免无关逻辑）
     const eventName = input.hookEventName || '';
     if (meta.events && meta.events.length > 0 && !meta.events.includes(eventName)) {
       if (debug) console.error(`[astra-hook] event "${eventName}" not in ${meta.events.join(',')}, skip`);
-      return buildDecision('allow', `${hookName}: event not applicable`);
+      const d = buildDecision('allow', `${hookName}: event not applicable`);
+      auditDecision(d, { hookName, toolName: input.toolName, stdin, startedAt });
+      return d;
     }
 
     // 5b. 工具预过滤（2026-09-01 语义反转）：豁免名单模式——默认监控所有工具
@@ -88,7 +119,9 @@ export async function run(hookName, stdin, opts = {}) {
     if (meta.exemptTools && Array.isArray(meta.exemptTools) && input.toolName) {
       if (isExemptTool(input.toolName, meta.exemptTools)) {
         if (debug) console.error(`[astra-hook] tool "${input.toolName}" exempt (read-only), skip`);
-        return buildDecision('allow', `${hookName}: tool exempt`);
+        const d = buildDecision('allow', `${hookName}: tool exempt`);
+        auditDecision(d, { hookName, toolName: input.toolName, stdin, startedAt });
+        return d;
       }
     }
 
@@ -98,12 +131,17 @@ export async function run(hookName, stdin, opts = {}) {
 
     // hook 返回合法决策则原样返回；否则 fail-open
     if (result && typeof result === 'object' && result.hookSpecificOutput) {
+      auditDecision(result, { hookName, toolName: input.toolName, stdin, startedAt });
       return result;
     }
-    return buildDecision('allow', `${hookName}: no decision, fail-open`);
+    const d = buildDecision('allow', `${hookName}: no decision, fail-open`);
+    auditDecision(d, { hookName, toolName: input.toolName, stdin, startedAt });
+    return d;
   } catch (err) {
     // 任何异常 → fail-open（绝不 deny 正常工具调用）
     if (debug) console.error(`[astra-hook] runtime error: ${err?.message || err}, fail-open`);
-    return FAIL_OPEN_DECISION;
+    const d = FAIL_OPEN_DECISION;
+    auditDecision(d, { hookName, stdin, startedAt });
+    return d;
   }
 }
