@@ -76,6 +76,8 @@ function compilePatterns(patternStr) {
   return patternStr
     .split(',')
     .map((p) => p.trim())
+    // 去除 YAML 值残留引号（parseErrorClassesYaml 不做去引号，此处兜底）
+    .map((p) => p.replace(/^["']|["']$/g, '').trim())
     .filter(Boolean)
     .map((p) => {
       try {
@@ -104,10 +106,18 @@ export function loadErrorClasses(configPath) {
     const parsed = parseErrorClassesYaml(readFileSync(path, 'utf8'));
     if (!parsed || !parsed['error-classes']) return null;
     const classes = parsed['error-classes'];
+    // patterns 可能是嵌套对象（parseErrorClassesYaml 将 "key: value" 中含冒号的
+    // 值误判为 subsection——正则片段含 "403:" 类形态时）或字符串；两种形态都取
+    // patterns 键的标量值。compilePatterns 内部对非字符串返回空数组（fail-open）。
+    const extractPatterns = (node) => {
+      if (typeof node === 'string') return node;
+      if (node && typeof node === 'object' && typeof node.patterns === 'string') return node.patterns;
+      return '';
+    };
     const config = {
-      permission: compilePatterns(classes['permission']?.patterns),
-      transient: compilePatterns(classes['transient']?.patterns),
-      rateLimit: compilePatterns(classes['rate-limit']?.patterns),
+      permission: compilePatterns(extractPatterns(classes['permission'])),
+      transient: compilePatterns(extractPatterns(classes['transient'])),
+      rateLimit: compilePatterns(extractPatterns(classes['rate-limit'])),
     };
     cachedConfig = config;
     cachedPath = path;

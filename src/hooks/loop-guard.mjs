@@ -69,6 +69,7 @@ export default async function loopGuard(input, meta, { debug = false } = {}) {
     const nudgeCycle = (prev && prev.lastTool === toolName) ? (prev.nudgeCycle || 0) : 0;
 
     return {
+      ...(prev || {}), // #1020：保留 prev 中其他维度字段（permissionFlag 等，防跨事件覆盖丢失）
       history: nextHist,
       streak,
       lastFp: fingerprint,
