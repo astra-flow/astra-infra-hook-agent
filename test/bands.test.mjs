@@ -92,6 +92,8 @@ test('BANDS: loop-guard integration — bands threshold takes effect', async () 
     '  threshold: 2',
     '  breakerLimit: 4',
     '  maxHistory: 50',
+    '  nudgeThreshold: 2',
+    '  toolStreakLimit: 12',
   ].join('\n'), 'utf8');
   process.env.ASTRA_BANDS_FILE = custom;
 

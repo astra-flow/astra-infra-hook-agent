@@ -64,8 +64,8 @@ test('BR3: loop-guard — bands without loop-guard section → defaults fallback
   try {
     const { loadBands } = await import('../src/lib/config.mjs');
     const bands = loadBands();
-    assert.deepEqual(bands['loop-guard'], { threshold: 3, breakerLimit: 8, maxHistory: 50 },
-      'defaults must survive bands file without loop-guard section');
+    assert.deepEqual(bands['loop-guard'], { threshold: 3, breakerLimit: 8, maxHistory: 50, nudgeThreshold: 2, toolStreakLimit: 12 },
+      'defaults must survive bands file without loop-guard section (#1020 加 nudgeThreshold/toolStreakLimit)');
 
     // meta.maxHistory 兜底（54 的 || 50 分支）：bands defaults 有 maxHistory=50，
     // meta 缺省时 slice(-50) 生效——通过长 history 验证截断行为
