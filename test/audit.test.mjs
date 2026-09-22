@@ -40,7 +40,7 @@ function decisionOf(d, reason = 'test reason') {
 }
 
 describe('buildAuditRecord', () => {
-  test('allow/deny/ask 三决策类型均产出 7 字段完整记录', () => {
+  test('allow/deny/ask 三决策类型均产出 8 字段完整记录（#1020 加 decision_detail）', () => {
     for (const d of ['allow', 'deny', 'ask']) {
       const rec = buildAuditRecord(decisionOf(d), {
         hookName: 'loop-guard',
@@ -51,7 +51,7 @@ describe('buildAuditRecord', () => {
       });
       assert.deepEqual(
         Object.keys(rec).sort(),
-        ['decision', 'duration_ms', 'hook_name', 'reason', 'session_id', 'tool_name', 'ts'].sort()
+        ['decision', 'decision_detail', 'duration_ms', 'hook_name', 'reason', 'session_id', 'tool_name', 'ts'].sort()
       );
       assert.equal(rec.decision, d);
       assert.equal(rec.hook_name, 'loop-guard');
@@ -60,6 +60,7 @@ describe('buildAuditRecord', () => {
       assert.equal(rec.duration_ms, 12); // 四舍五入
       assert.equal(rec.ts, '2026-09-14T08:00:00.000Z');
       assert.equal(rec.reason, 'test reason');
+      assert.equal(rec.decision_detail, null); // 未传 detail 时为 null（向后兼容）
     }
   });
 
