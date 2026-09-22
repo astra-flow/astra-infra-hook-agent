@@ -71,7 +71,7 @@ infra/hook-agent/
 │   │   ├── config.mjs          # hook 元数据 schema（事件/超时/平台，CP-02）
 │   │   └── validate.mjs        # 输入白名单校验 + 路径防护（CP-05）
 │   └── hooks/
-│       ├── loop-guard.mjs      # PreToolUse 防循环（crypto sha256 + HOT_TOOLS 预过滤）
+│       ├── loop-guard.mjs      # PreToolUse/PostToolUse 防循环（指纹去重 + 同工具计数苗头提醒 + 兜底第四轨道 + 错误分类权限即停，#1020）
 │       ├── decision-log.mjs    # 决策审计（async 后台评论）
 │       └── session-issue-link.mjs  # 会话↔Issue 关联
 ├── test/                       # node:test evals + fixtures（双平台样例）

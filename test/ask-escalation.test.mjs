@@ -87,6 +87,8 @@ test('ASK: askThreshold configurable via bands file', async () => {
     '  askThreshold: 3',
     '  breakerLimit: 4',
     '  maxHistory: 50',
+    '  nudgeThreshold: 2',
+    '  toolStreakLimit: 12',
     '',
   ].join('\n'));
   process.env.ASTRA_BANDS_FILE = bandsFile;

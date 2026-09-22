@@ -59,7 +59,9 @@ test('FP: deny output includes systemMessage for agent correction', async () => 
   assert.match(r3.systemMessage, /改变行为/);
   // reason 也含可执行的下一步行动（#957 P1a 正向指令）
   assert.match(r3.hookSpecificOutput.permissionDecisionReason, /下一步行动/);
-  assert.match(r3.hookSpecificOutput.permissionDecisionReason, /参数变化会重置计数/);
+  // #1020 FR-003（US2）：绕过指引已删除——拦截消息不得含“参数变化会重置计数”类表述
+  assert.doesNotMatch(r3.hookSpecificOutput.permissionDecisionReason, /参数变化会重置计数/);
+  assert.doesNotMatch(r3.systemMessage, /修改参数/);
 });
 
 test('FP: escalation to ask after repeated denials (#957)', async () => {

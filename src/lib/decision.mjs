@@ -90,7 +90,22 @@ export function buildAsk(reason, eventName = 'PreToolUse', systemMessage = '') {
   return out;
 }
 
-/** 构造 allow/continue 决策 */
-export function buildAllow(reason = '', eventName = '') {
-  return buildDecision('allow', reason, eventName);
+/**
+ * 构造 allow/continue 决策（#1020 扩展：支持附加上下文字段）。
+ *
+ * 苗头提醒（US1）载体：allow 决策 + additionalContext（主通道，注入模型上下文）
+ * + systemMessage（兜底，平台不支持 additionalContext 时仍可达）——与 delivery
+ * hooks 先例同构（delivery-workitem-link/stage-label/constitution-check 均为
+ * allow + additionalContext + systemMessage 并用，delivery-hooks.test.mjs 有断言）。
+ *
+ * @param {string} reason - permissionDecisionReason（UI 展示）
+ * @param {string} [eventName]
+ * @param {string} [systemMessage] - 注入模型上下文的说明（平台不支持则忽略）
+ * @param {string} [additionalContext] - 注入模型上下文的额外内容（软引导正文）
+ */
+export function buildAllow(reason = '', eventName = '', systemMessage = '', additionalContext = '') {
+  const out = buildDecision('allow', reason, eventName);
+  if (systemMessage) out.systemMessage = systemMessage;
+  if (additionalContext) out.hookSpecificOutput.additionalContext = additionalContext;
+  return out;
 }

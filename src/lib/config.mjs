@@ -15,8 +15,8 @@ import { fileURLToPath } from 'node:url';
 export const HOOK_METADATA = {
   'loop-guard': {
     name: 'loop-guard',
-    description: 'PreToolUse 重复执行检测（防死循环）',
-    events: ['PreToolUse'],
+    description: 'PreToolUse/PostToolUse 重复执行检测（防死循环，#1020 加苗头提醒/同工具计数/错误分类）',
+    events: ['PreToolUse', 'PostToolUse'],
     timeoutMs: 5000,
     platforms: ['vscode', 'claude-code'],
     // 豁免名单（exempt，2026-09-01 语义反转）：只读无害工具跳过指纹检测。
@@ -33,6 +33,11 @@ export const HOOK_METADATA = {
     ],
     threshold: 3, // 连续 N 次相同指纹触发拦截
     maxHistory: 50,
+    // 苗头提醒（#1020 US1，R8）：同工具连续调用达 nudgeThreshold 次时 allow+软引导
+    nudgeThreshold: 2,
+    // 兜底第四轨道（#1020 US3，R8）：同工具连续调用达 toolStreakLimit 次时
+    // 直接 ask 人工审批（引导已失效，宁可严拦）
+    toolStreakLimit: 12,
     // 熔断器（2026-09-01）：连续拦截达 breakerLimit 后，从 per-call deny 升级为
     // 终止整个 Agent 回合（continue:false + stopReason）。背景：deny+systemMessage
     // 对陷入"计划固位"失败模式的模型无效（#899 事故：拦截 168 次仍重试），
@@ -164,7 +169,7 @@ export const BANDS_DEFAULTS = {
     '2': { action: 'diagnose', description: '只读诊断' },
     '3': { action: 'act', description: '允许行动' },
   },
-  'loop-guard': { threshold: 3, breakerLimit: 8, maxHistory: 50 },
+  'loop-guard': { threshold: 3, breakerLimit: 8, maxHistory: 50, nudgeThreshold: 2, toolStreakLimit: 12 },
 };
 
 /** 解析单行 YAML 值（字符串去引号后仍尝试数字/布尔转换） */
