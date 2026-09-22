@@ -18,7 +18,7 @@
  * 字段与 PG hook_audit 表 7 字段一一对应（ts/hook_name/tool_name/decision/
  * reason/session_id/duration_ms）。
  */
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 
@@ -77,7 +77,7 @@ export function clampLine(line) {
  * @returns {object} 审计记录（7 字段）
  */
 export function buildAuditRecord(decision, context) {
-  const { hookName, toolName, sessionId, durationMs, now = new Date() } = context;
+  const { hookName, toolName, sessionId, durationMs, now = new Date(), decisionDetail } = context;
   const output = decision?.hookSpecificOutput ?? {};
   const permissionDecision = output.permissionDecision ?? decision?.decision ?? 'allow';
   // decision 枚举归一：allow/deny/ask 之外的值归 allow（防御性，不抛错）
@@ -92,6 +92,9 @@ export function buildAuditRecord(decision, context) {
     reason: output.reason ?? decision?.reason ?? null,
     session_id: sessionId ?? null,
     duration_ms: Number.isFinite(durationMs) ? Math.round(durationMs) : null,
+    // #1020 决策明细（可空，向后兼容——旧消费方忽略未知字段）：
+    // nudge / tool_streak_breaker / permission_block / fingerprint_deny / fingerprint_ask
+    decision_detail: decisionDetail ?? null,
   };
 }
 
@@ -113,7 +116,7 @@ export function extractSessionId(stdinJson) {
  * 审计写入主入口（旁路调用，任何异常静默吞掉）
  *
  * @param {object} decision runtime 决策结果
- * @param {object} context {hookName, toolName, sessionId, durationMs, now?}
+ * @param {object} context {hookName, toolName, sessionId, durationMs, now?, decisionDetail?}
  * @param {object} [deps] 依赖注入（测试用）：{file, writeFn, clock}
  * @returns {boolean} 写入是否成功（仅供测试/诊断，调用方不得据此改变决策行为）
  */
@@ -128,5 +131,89 @@ export function writeAudit(decision, context, deps = {}) {
   } catch {
     // fail-open：审计失败绝不影响决策（静默降级，缓冲续传由 sync 补偿）
     return false;
+  }
+}
+
+/** signals 缓冲文件默认路径（XDG，与 audit.jsonl 同目录；ASTRA_SIGNALS_FILE 可覆盖） */
+export function defaultSignalsFile() {
+  const base = process.env.ASTRA_SIGNALS_FILE;
+  if (base) return base;
+  const dir = process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state');
+  try {
+    mkdirSync(join(dir, 'astra-hook'), { recursive: true });
+    return join(dir, 'astra-hook', 'signals.jsonl');
+  } catch {
+    try {
+      mkdirSync(join(tmpdir(), 'astra-hook'), { recursive: true });
+      return join(tmpdir(), 'astra-hook', 'signals.jsonl');
+    } catch {
+      return '/dev/null'; // 最终兑底：写入黑洞，fail-open
+    }
+  }
+}
+
+/**
+ * signals 留痕写入（#1020 FR-011，R4 决策：JSONL 缓冲 + astra metrics sync 补偿入 PG）
+ *
+ * 熔断事件（tool_streak_breaker）触发时由 loop-guard 旁路调用。
+ * 行格式（与 PG signals 表字段对应，layer 直写——002 迁移已交付 layer 列）：
+ *   {"ts":"...","source_issue_id":1020,"signal_type":"gap","layer":"L2",
+ *    "direction":"backward","description":"...","status":"pending","session_id":"..."}
+ *
+ * source_issue_id 来源：session-issue-link 文件（memories/session/issue-link.md，
+ * 行格式 `session=<id> | issue=#N` 契约已有）解析；无关联会话置 null。
+ *
+ * fail-open：任何异常静默吞掉——JSONL 本身就是本地日志（降级路径），
+ * 写失败不阻塞拦截动作（FR-011 降级语义）。
+ *
+ * @param {object} signal {signalType, layer, description, sessionId, sourceIssueId?}
+ * @param {object} [deps] 依赖注入（测试用）：{file, writeFn, clock}
+ * @returns {boolean} 写入是否成功
+ */
+export function writeSignal(signal, deps = {}) {
+  try {
+    const file = deps.file ?? defaultSignalsFile();
+    const writeFn = deps.writeFn ?? appendFileSync;
+    const now = deps.clock ? deps.clock() : new Date();
+    const record = {
+      ts: now.toISOString(),
+      source_issue_id: signal.sourceIssueId ?? null,
+      signal_type: signal.signalType ?? 'gap',
+      layer: signal.layer ?? 'L2',
+      direction: signal.direction ?? 'backward',
+      description: signal.description ?? '',
+      status: signal.status ?? 'pending',
+      session_id: signal.sessionId ?? null,
+    };
+    const line = clampLine(JSON.stringify(record));
+    writeFn(file, line + '\n', { flag: 'a' }); // O_APPEND：并发追加原子
+    return true;
+  } catch {
+    return false; // fail-open：留痕失败不阻塞拦截（FR-011）
+  }
+}
+
+/**
+ * 从 session-issue-link 文件解析会话关联的 Issue 编号（signals source_issue_id 来源）
+ * 行格式契约：`- <ts> | <event> | session=<id> | issue=#N`（session-link.mjs 同源）
+ * @param {string} sessionId
+ * @param {object} [deps] 依赖注入（测试用）：{file, readFn}
+ * @returns {number|null} Issue 编号；无关联/文件缺失返回 null
+ */
+export function resolveSourceIssue(sessionId, deps = {}) {
+  try {
+    const file = deps.file ?? process.env.ASTRA_SESSION_LINK_FILE
+      ?? join(process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'astra-hook', 'issue-link.md');
+    const readFn = deps.readFn ?? readFileSync;
+    if (!existsSync(file)) return null;
+    const lines = readFn(file, 'utf8').split('\n');
+    // 倒序找最近一条该 session 的关联（多 Issue 会话取最新）
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const m = lines[i].match(new RegExp(`session=${String(sessionId).replace(/[^a-zA-Z0-9._-]/g, '_')} \\| issue=#(\\d+)`));
+      if (m) return parseInt(m[1], 10);
+    }
+    return null;
+  } catch {
+    return null; // fail-open：解析失败不阻塞 signals 写入
   }
 }
