@@ -1,0 +1,23 @@
+# error-classes.yaml — 工具错误分类表（#1020 FR-007/FR-012，R3 决策）
+#
+# 用途：PostToolUse 事件中 toolResponse 的文本模式匹配分类——
+#       permission（权限类：首次失败即停，重试直接拦截）
+#       rate-limit（限流类：需退避，不进入重试计数）
+#       transient（瞬时可重试：超时/5xx/网络抖动，允许有限重试）
+#
+# 加载规则：
+#   - 位置：hook-agent/config/error-classes.yaml（默认）；与 bands.yaml 同级
+#   - 文件缺失/解析失败 → 全部归 transient（fail-open，不误拦）
+#   - 结构：两层嵌套 key: value；patterns 为逗号分隔的正则片段（i 大小写不敏感）
+#   - 修改本文件后无需重启（spawn-per-call 模型，每次调用重新加载）
+#
+# 扩展约定（FR-012）：新增错误类型 = 加分类节 + patterns；新增模式 = 逗号追加。
+# 判定顺序：permission → rate-limit → transient（权限最优先，见 error-class.mjs）。
+
+error-classes:
+  permission:
+    patterns: "403, 401, Forbidden, Unauthorized, permission denied, access denied, Resource not accessible"
+  rate-limit:
+    patterns: "429, rate limit, too many requests"
+  transient:
+    patterns: "timeout, ECONNRESET, ECONNREFUSED, ENOTFOUND, 5xx, Bad Gateway, Service Unavailable, network error, socket hang up"
