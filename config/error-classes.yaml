@@ -1,9 +1,25 @@
-# error-classes.yaml — 工具错误分类表（#1020 FR-007/FR-012，R3 决策）
+# error-classes.yaml — 工具错误分类表（#1020 FR-007/FR-012，R3 决策；#1063 P1 强/弱模式）
 #
 # 用途：PostToolUse 事件中 toolResponse 的文本模式匹配分类——
 #       permission（权限类：首次失败即停，重试直接拦截）
 #       rate-limit（限流类：需退避，不进入重试计数）
 #       transient（瞬时可重试：超时/5xx/网络抖动，允许有限重试）
+#
+# #1063 强/弱模式（熔断误杀修复）：
+#   permission 节两级模式——
+#     strong_patterns：错误响应形态才触发权限即停（置位 permissionFlag）：
+#       - 错误前缀 + 状态码（Error: 403 / error code 401）
+#       - 状态码 + 权限词（401 Unauthorized / 403 Forbidden）
+#       - 状态码 + 错误语义（403 Resource not accessible——#942 实证）
+#       - 完整权限短语（permission denied / access denied——几乎只出现在错误）
+#       - 权限词 + 介词后缀（Forbidden for / Unauthorized by——错误语义结构）
+#       注：内置兜底正则（同语义，见 error-class.mjs BUILTIN_STRONG_RE）在配置缺失/
+#       全弱模式下始终生效（防漏判）。刻意排除裸 \b40[13]\b 与 "HTTP 401" 前缀——
+#       正文提及（评论/文档/终端回显测试输出）也会误命中（三轮活体实证）。
+#     weak_patterns：裸关键词（正文含 Forbidden/permission denied 等，无错误形态）。
+#       仅返回 weak-permission 供审计，不置位——业务文本不再误杀（活体实证：#1063
+#       读取含 "403"/"permission denied" 字样的 Issue 评论被误判权限而拦截）。
+#   兼容：旧配置仅 patterns 键 → 按 weak_patterns 处理（消除误杀优先）。
 #
 # 加载规则：
 #   - 位置：hook-agent/config/error-classes.yaml（默认）；与 bands.yaml 同级
@@ -12,11 +28,12 @@
 #   - 修改本文件后无需重启（spawn-per-call 模型，每次调用重新加载）
 #
 # 扩展约定（FR-012）：新增错误类型 = 加分类节 + patterns；新增模式 = 逗号追加。
-# 判定顺序：permission → rate-limit → transient（权限最优先，见 error-class.mjs）。
+# 判定顺序：强模式 permission → rate-limit → transient → 弱模式 weak-permission。
 
 error-classes:
   permission:
-    patterns: "403, 401, Forbidden, Unauthorized, permission denied, access denied, Resource not accessible"
+    strong_patterns: "Error: 403, Error: 401, error code 401, error code 403, 403 Forbidden, 401 Unauthorized, 403 Resource not accessible, Error:.*permission denied, Error:.*access denied"
+    weak_patterns: "Forbidden, Unauthorized, permission denied, access denied, Resource not accessible"
   rate-limit:
     patterns: "429, rate limit, too many requests"
   transient:
