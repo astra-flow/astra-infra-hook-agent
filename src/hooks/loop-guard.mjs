@@ -11,7 +11,7 @@
  */
 import crypto from 'node:crypto';
 import { buildDeny, buildAsk, buildAllow, buildCircuitBreaker } from '../lib/decision.mjs';
-import { updateState } from '../lib/state.mjs';
+import { updateState, readState } from '../lib/state.mjs';
 import { isExemptTool } from '../lib/validate.mjs';
 import { loadBands } from '../lib/config.mjs';
 import { classifyError, ERROR_CLASSES } from '../lib/error-class.mjs';
@@ -84,9 +84,21 @@ export default async function loopGuard(input, meta, { debug = false } = {}) {
   const streak = state?.streak || 1;
   const toolStreak = state?.toolStreak || 1;
 
+  // ===== 拦截标记（#1063 P2，FR-104）=====
+  // 任何 deny/ask 拦截发生时记录 lastBlocked（工具+时间戳）——作为"该工具被拦过"
+  // 的证据，供 PostToolUse 侧判定"放行后清计数"（工具实际执行 = 被用户放行的强证据）。
+  const markBlocked = async () => {
+    await updateState('loop-guard', sessionId, (prev) => ({
+      ...(prev || {}),
+      lastBlocked: { tool: toolName, at: Date.now() },
+      updatedAt: Date.now(),
+    }));
+  };
+
   // ===== 权限标记拦截（#1020 US4，FR-008）=====
   // PostToolUse 已记录权限错误 → 同类工具重试直接拦截（无需计数达标）
   if (state?.permissionFlag && state?.permissionTool === toolName) {
+    await markBlocked();
     return buildDeny(
       `[权限错误重试拦截] 工具 \`${toolName}\` 刚返回权限类错误（403/401），重试已被拦截。\n\n` +
       `- 权限错误不可重试：重试无意义且可能触发安全审计\n` +
@@ -110,6 +122,7 @@ export default async function loopGuard(input, meta, { debug = false } = {}) {
       description: `[Layer: L2] 同工具连续调用 ${toolStreak} 次触发兜底熔断（参数变异逃逸指纹去重）——工具 ${toolName}`,
       sessionId,
     });
+    await markBlocked();
     return buildAsk(
       `[防循环兜底·人工审批] 工具 \`${toolName}\` 已被连续调用 ${toolStreak} 次（无论参数如何变化），触发兜底熔断。\n\n` +
       `- 判定：连续调用同一工具本身即视为循环嫌疑（参数变异逃逸指纹去重的盲区）\n` +
@@ -137,6 +150,7 @@ export default async function loopGuard(input, meta, { debug = false } = {}) {
     // 环境中熔断未能终止回合（Agent 熔断后仍重试至 290 次）。ask 是平台语义中
     // 唯一无法被模型自动绕过的停止信号——工具调用挂起等待用户确认。
     if (streak >= breakerLimit) {
+      await markBlocked();
       return buildAsk(
         `[防循环熔断·人工审批] 工具 \`${toolName}\` 已被连续拦截 ${streak - threshold + 1} 次（相同参数第 ${streak} 次调用），升级为强制人工审批。\n\n` +
         `- 最近一次参数：\`${summary}\`\n` +
@@ -151,6 +165,7 @@ export default async function loopGuard(input, meta, { debug = false } = {}) {
     // 连续拦截升级：streak 达到 askThreshold，说明 Agent 未响应纠偏指引，升级为 ask
     // （#957 P0：原升级警告仍为 deny 自动拦截，实证无效；ask 强制用户介入）
     if (streak >= askThreshold) {
+      await markBlocked();
       return buildAsk(
         `[防循环升级·人工审批] 工具 \`${toolName}\` 已被连续拦截 ${streak - threshold + 1} 次（相同参数第 ${streak} 次调用），Agent 未响应纠偏指引，升级为强制人工审批。\n\n` +
         `- 最近一次参数：\`${summary}\`\n` +
@@ -166,6 +181,7 @@ export default async function loopGuard(input, meta, { debug = false } = {}) {
     // 业界 loop-breaker 采用正向措辞，明确告知替代动作而非否定式警告）
     // #1020 FR-003（US2）：删除"参数变化会重置计数"类绕过指引——#993 实证该表述
     // 被模型放大为换参数绕过策略；统一"停止并报告"三选项语义
+    await markBlocked();
     return buildDeny(
       `[防循环拦截] 检测到重复执行：工具 \`${toolName}\` 已连续调用 ${streak} 次且无进展。\n\n` +
       `- 最近一次参数：\`${summary}\`\n` +
@@ -243,6 +259,29 @@ async function postToolUseHandler(input, meta, { debug = false } = {}) {
       `[权限类错误·停止重试] 工具 \`${toolName}\` 返回 403/401 类错误。` +
       `这不是瞬时故障，重试不会恢复。请改用其他方案完成目标，或向用户文字报告并等待指示。`
     );
+  }
+
+  // ===== 放行清计数（#1063 P2，FR-104）=====
+  // VS Code hook 协议无"用户批准"事件 → 放行证据 = 拦截之后该工具的下一次成功
+  // PostToolUse（工具实际执行 = 被用户放行的强证据）。清 streak/toolStreak/
+  // permissionFlag/lastBlocked（保留 history/lastFp 供苗头上下文）。
+  // 仅"拦截后首次成功"清计数；正常连续调用不清（防循环利用——清计数 ≠ 豁免，
+  // 苗头/熔断阈值仍生效，只是从新周期计数）。
+  // 注意：条件不要求 permissionFlag 已清——清计数的目的正是清 permissionFlag 本身
+  // （权限拦截 → 用户放行改换方案 → 工具成功执行 → 清权限标记恢复可用）。
+  const state = await readState('loop-guard', sessionId);
+  const lastBlocked = state?.lastBlocked;
+  if (lastBlocked && lastBlocked.tool === toolName) {
+    await updateState('loop-guard', sessionId, (prev) => ({
+      ...(prev || {}),
+      streak: 0,
+      toolStreak: 0,
+      nudgeDone: false,
+      permissionFlag: false,
+      permissionTool: null,
+      lastBlocked: null,
+      updatedAt: Date.now(),
+    }));
   }
 
   // US5：终端续行启发式（终端类工具连续 2 次空响应 → 诊断提醒）
