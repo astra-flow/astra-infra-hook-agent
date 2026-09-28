@@ -1,8 +1,15 @@
 /**
- * error-class.mjs — 工具错误分类（#1020 FR-007/FR-012，R3 决策）
+ * error-class.mjs — 工具错误分类（#1020 FR-007/FR-012，R3 决策；#1063 P1 强/弱模式）
  *
  * 职责：PostToolUse 事件中，对 toolResponse 做文本模式匹配，判定错误类别
  * （permission / transient / rate-limit），供 loop-guard 权限即停逻辑消费。
+ *
+ * #1063 P1 修复（熔断误杀）：permission 判定引入强/弱两级模式——
+ *   - 强模式（strong_patterns）：错误响应形态（HTTP 状态码 \b40[13]\b、
+ *     Error:.*permission denied 等错误前缀）才触发 PERMISSION（置位 permissionFlag）
+ *   - 弱模式（weak_patterns）：裸关键词（正文含 Forbidden/permission denied 等），
+ *     仅返回 WEAK_PERMISSION（审计日志），不置位——业务文本不再误杀
+ *   - 内置兜底：状态码正则 \b40[13]\b 在配置缺失/全弱模式下始终生效（防真实 403 漏判）
  *
  * 设计约束：
  * - 纯函数：加载配置与判定分离，便于测试（coverage 100% 基线）
@@ -18,10 +25,29 @@ import { fileURLToPath } from 'node:url';
 
 /** 错误类别枚举（与 error-classes.yaml 分类节一一对应） */
 export const ERROR_CLASSES = {
-  PERMISSION: 'permission',   // 权限类：首次失败即停，重试直接拦截（FR-007/008）
+  PERMISSION: 'permission',   // 权限类（强模式命中）：首次失败即停，重试直接拦截（FR-007/008）
+  WEAK_PERMISSION: 'weak-permission', // 权限弱模式命中（#1063）：裸关键词，仅审计，不置位
   RATE_LIMIT: 'rate-limit',   // 限流类：需退避，不进入重试计数（FR-007）
   TRANSIENT: 'transient',     // 瞬时类：允许有限重试（FR-007）
 };
+
+/**
+ * 内置强模式兜底正则（#1063 FR-101/plan T1）：权限错误的**错误响应**形态。
+ * 配置缺失/全弱模式/配置漂移时始终生效，防真实权限错误漏判（安全底线）。
+ *
+ * 关键设计（三轮活体实证 + 原 spec 回归约束）：
+ *   1. 不能是裸 \b40[13]\b——正文提及 "403"（Issue 评论/文档举例）即误命中。
+ *   2. 不能是 "HTTP 401" 前缀——终端回显测试输出（断言文本含 "HTTP 401"）误命中。
+ *   3. 必须保留原 spec 权限语义（error-class.test.mjs EC1/EC8 回归）：
+ *      - `Error: 403` / `error code 403`（错误前缀 + 状态码）
+ *      - `401 Unauthorized` / `403 Forbidden`（状态码 + 权限词）
+ *      - `403 Resource not accessible`（状态码 + 错误语义——EC8 #942 实证）
+ *      - `permission denied` / `access denied`（完整短语——几乎只出现在错误响应）
+ *      - `Forbidden for ...` / `Unauthorized by ...`（权限词 + 错误语义介词后缀）
+ *   4. 纯业务文本（裸 "403"/"Forbidden" 出现在正文/标题）→ 弱模式，不误杀。
+ */
+const BUILTIN_STRONG_RE =
+  /(?:^|[\s:(])(?:Error|error code|message)\s*[: ]\s*40[13]|40[13]\s+(?:Forbidden|Unauthorized|error|Resource\s+not\s+accessible)|(?:permission|access)\s+denied|\bForbidden\s+(?:for|by|to|when|in|on)\b|\bUnauthorized\s+(?:for|by|to|when|in|on)\b/i;
 
 /** 配置文件默认路径（config/error-classes.yaml，与 bands.yaml 同级） */
 function defaultConfigPath() {
@@ -95,8 +121,14 @@ let cachedPath = null;
 
 /**
  * 加载错误分类配置（带缓存；文件缺失/解析失败返回 null → 调用方 fail-open）。
+ * #1063 重构：permission 节支持 strong_patterns/weak_patterns 两级；
+ * 旧配置（patterns 键）按弱模式处理（消除误杀优先，真实错误由内置强模式兜底）。
  * @param {string} [configPath] - 显式路径（测试注入用）；默认 config/error-classes.yaml
- * @returns {object|null} { permission: RegExp[], transient: RegExp[], rateLimit: RegExp[] }
+ * @returns {object|null} {
+ *   permission: RegExp[],      // 强模式（触发置位）+ 内置兜底
+ *   weakPermission: RegExp[],  // 弱模式（仅审计，不置位）
+ *   transient: RegExp[], rateLimit: RegExp[]
+ * }
  */
 export function loadErrorClasses(configPath) {
   const path = configPath || defaultConfigPath();
@@ -108,16 +140,27 @@ export function loadErrorClasses(configPath) {
     const classes = parsed['error-classes'];
     // patterns 可能是嵌套对象（parseErrorClassesYaml 将 "key: value" 中含冒号的
     // 值误判为 subsection——正则片段含 "403:" 类形态时）或字符串；两种形态都取
-    // patterns 键的标量值。compilePatterns 内部对非字符串返回空数组（fail-open）。
-    const extractPatterns = (node) => {
-      if (typeof node === 'string') return node;
-      if (node && typeof node === 'object' && typeof node.patterns === 'string') return node.patterns;
+    // 指定键的标量值。compilePatterns 内部对非字符串返回空数组（fail-open）。
+    const extractPatterns = (node, key) => {
+      if (typeof node === 'string') return node; // 整节是字符串（旧形态）
+      if (node && typeof node === 'object') {
+        // 新形态：strong_patterns/weak_patterns 子键
+        if (typeof node[key] === 'string') return node[key];
+        // 兼容形态：整节下直接挂 patterns（旧结构）
+        if (key === 'patterns' && typeof node.patterns === 'string') return node.patterns;
+      }
       return '';
     };
+    const permNode = classes['permission'];
+    // #1063：强/弱两级模式。强模式 = 显式 strong_patterns + 内置兜底；
+    // 旧配置（仅 patterns）→ 该 patterns 归弱模式（不置位），内置兜底保证真实 403 仍即停。
+    const strongPatterns = extractPatterns(permNode, 'strong_patterns');
+    const weakPatterns = extractPatterns(permNode, 'weak_patterns') || extractPatterns(permNode, 'patterns');
     const config = {
-      permission: compilePatterns(extractPatterns(classes['permission'])),
-      transient: compilePatterns(extractPatterns(classes['transient'])),
-      rateLimit: compilePatterns(extractPatterns(classes['rate-limit'])),
+      permission: [BUILTIN_STRONG_RE, ...compilePatterns(strongPatterns)],
+      weakPermission: compilePatterns(weakPatterns),
+      transient: compilePatterns(extractPatterns(classes['transient'], 'patterns')),
+      rateLimit: compilePatterns(extractPatterns(classes['rate-limit'], 'patterns')),
     };
     cachedConfig = config;
     cachedPath = path;
@@ -136,8 +179,12 @@ export function clearErrorClassesCache() {
 /**
  * 判定 toolResponse 的错误类别。
  *
- * 判定顺序：permission → rate-limit → transient（权限最优先——误归 transient
- * 会导致权限错误被重试，安全代价最高）。无匹配 → transient（fail-open）。
+ * #1063 判定顺序：强模式 permission → rate-limit → transient → 弱模式 weak-permission。
+ *   - 强模式（含内置兜底 \b40[13]\b）命中 → PERMISSION（置位，权限即停）
+ *   - rate-limit 命中 → RATE_LIMIT（退避）
+ *   - 弱模式命中（裸关键词，无错误形态）→ WEAK_PERMISSION（仅审计，不置位）
+ *   - 无匹配 → TRANSIENT（fail-open，不误拦）
+ * 弱模式放最后：不覆盖更严重的分类（真实错误形态优先于业务文本关键词）。
  *
  * @param {string|object} toolResponse - PostToolUse 事件的工具执行结果
  * @param {object} [config] - 显式配置（测试注入用）；缺省时 loadErrorClasses()
@@ -150,9 +197,10 @@ export function classifyError(toolResponse, config) {
       : JSON.stringify(toolResponse ?? '');
     if (!text) return ERROR_CLASSES.TRANSIENT;
     const cfg = config || loadErrorClasses();
-    if (!cfg) return ERROR_CLASSES.TRANSIENT; // 配置缺失 → fail-open
+    if (!cfg) return ERROR_CLASSES.TRANSIENT; // 配置缺失 → fail-open（内置兜底不适用，见 loadErrorClasses）
     if (cfg.permission.some((re) => re.test(text))) return ERROR_CLASSES.PERMISSION;
     if (cfg.rateLimit.some((re) => re.test(text))) return ERROR_CLASSES.RATE_LIMIT;
+    if (cfg.weakPermission.some((re) => re.test(text))) return ERROR_CLASSES.WEAK_PERMISSION;
     return ERROR_CLASSES.TRANSIENT; // 无匹配 → 瞬时（fail-open，不误拦）
   } catch {
     return ERROR_CLASSES.TRANSIENT; // 任何异常 → 瞬时（fail-open）
