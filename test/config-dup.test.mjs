@@ -42,7 +42,10 @@ test('config: no duplicate hook registration across *.json (dup-comment bug)', (
   }
 });
 
-test('config: decision-log registered exactly once for UserPromptSubmit', () => {
+test('config: decision-log registration count matches manifest (0 after 2026-09-29 removal)', () => {
+  // 2026-09-29 决策：hook 运行时配置迁出 repo（astra client 维护），
+  // decision-log.json 已从主仓 .github/hooks/ 删除 → 期望注册数为 0。
+  // 若未来恢复版本控制（gitignore 移除条目），此断言需同步改回 1。
   const files = fs.readdirSync(HOOKS_DIR).filter((f) => f.endsWith('.json'));
   let count = 0;
   for (const f of files) {
@@ -51,5 +54,5 @@ test('config: decision-log registered exactly once for UserPromptSubmit', () => 
       if (String(entry.command).includes('decision-log')) count += 1;
     }
   }
-  assert.equal(count, 1, `decision-log should be registered exactly once for UserPromptSubmit, got ${count}`);
+  assert.equal(count, 0, `decision-log should not be registered in repo config (managed by astra client), got ${count}`);
 });
